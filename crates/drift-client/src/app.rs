@@ -13,10 +13,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use drift_core::{ShipId, SystemId, Tick};
+use drift_core::{CommodityId, Quantity, ShipId, SystemId, Tick};
 use drift_economy::{
-    Command, EventCategory, Market, Owner, Patrol, PatrolLocation, PiracyStats, PlayerId, SimEvent,
-    Trader, TraderLocation,
+    Command, Contract, ContractKind, EncounterView, EventCategory, Future, FutureSide, Loan, Market,
+    Owner, Patrol, PatrolLocation, PiracyStats, PlayerId, Policy, SimEvent, Trader, TraderLocation,
 };
 use drift_mods::Registry;
 use drift_sim::Session;
@@ -45,6 +45,16 @@ pub struct ViewData {
     pub markets: Vec<Market>,
     /// Recent events for the log panel (oldest first).
     pub events: Vec<SimEvent>,
+    /// The live delivery-contract board, for the contracts panel.
+    pub contracts: Vec<Contract>,
+    /// Outstanding loans, for the finance panel.
+    pub loans: Vec<Loan>,
+    /// Active insurance policies.
+    pub policies: Vec<Policy>,
+    /// Open futures positions.
+    pub futures: Vec<Future>,
+    /// Battles currently playing out, for on-map markers.
+    pub encounters: Vec<EncounterView>,
     /// Connection status line for a remote source; `None` when local.
     pub status: Option<String>,
 }
@@ -120,6 +130,11 @@ impl LocalSource {
         out.navy = w.navy().to_vec();
         out.piracy = w.piracy_stats();
         out.markets = w.markets().to_vec();
+        out.contracts = w.contracts().to_vec();
+        out.loans = w.loans().to_vec();
+        out.policies = w.policies().to_vec();
+        out.futures = w.futures().to_vec();
+        out.encounters = w.encounter_views();
         out.events = w.events().cloned().collect();
         out.status = None;
     }
@@ -175,6 +190,11 @@ impl RemoteSource {
             out.navy = view.navy;
             out.piracy = view.piracy;
             out.markets = view.markets;
+            out.contracts = view.contracts;
+            out.loans = view.loans;
+            out.policies = view.policies;
+            out.futures = view.futures;
+            out.encounters = view.encounters;
         } else {
             out.tick = 0;
             out.now_f = 0.0;
@@ -182,6 +202,11 @@ impl RemoteSource {
             out.pirates.clear();
             out.navy.clear();
             out.markets.clear();
+            out.contracts.clear();
+            out.loans.clear();
+            out.policies.clear();
+            out.futures.clear();
+            out.encounters.clear();
             out.piracy = PiracyStats::default();
         }
 
@@ -215,6 +240,17 @@ pub struct DriftApp {
     spawn_capital: i64,
     /// Quantity used by the buy/sell controls.
     trade_qty: u32,
+    /// System whose market panel is open, if any (click any node to select).
+    selected: Option<SystemId>,
+    /// Whether the floating contracts panel is shown.
+    show_contracts: bool,
+    /// Whether the floating finance panel is shown.
+    show_finance: bool,
+    /// Principal the Borrow control will request.
+    borrow_amount: i64,
+    /// Commodity and quantity the futures control will trade.
+    future_commodity: CommodityId,
+    future_qty: u32,
 }
 
 impl DriftApp {
@@ -269,6 +305,12 @@ impl DriftApp {
             spawn_system: first_system,
             spawn_capital: 1000,
             trade_qty: 5,
+            selected: None,
+            show_contracts: false,
+            show_finance: false,
+            borrow_amount: 1000,
+            future_commodity: CommodityId(0),
+            future_qty: 5,
         }
     }
 
@@ -366,6 +408,17 @@ impl DriftApp {
                 p.pirates_destroyed + p.pirates_suppressed
             ));
             ui.label(format!("Bounties paid:     {}", p.bounties_paid));
+            ui.separator();
+
+            let open = self.view.contracts.iter().filter(|c| c.is_open()).count();
+            let label = format!("Contracts ({open} open) \u{2026}");
+            if ui.selectable_label(self.show_contracts, label).clicked() {
+                self.show_contracts = !self.show_contracts;
+            }
+            let fin = format!("Finance ({} loans) \u{2026}", self.view.loans.len());
+            if ui.selectable_label(self.show_finance, fin).clicked() {
+                self.show_finance = !self.show_finance;
+            }
             ui.separator();
 
             ui.label("Nodes: danger (green safe -> red lawless)");
@@ -535,7 +588,17 @@ impl DriftApp {
             });
     }
 
-    fn galaxy_map(&self, ctx: &egui::Context) {
+    /// The system whose node contains screen point `p` (within the node pick
+    /// radius), or `None`. Factored out of the click handler so it can be tested
+    /// without egui input.
+    fn system_at(&self, p: egui::Pos2, rect: egui::Rect) -> Option<SystemId> {
+        self.reg.systems().find_map(|s| {
+            let c = self.to_screen(s.position, rect);
+            (c.distance(p) <= NODE_PICK_RADIUS).then_some(s.id)
+        })
+    }
+
+    fn galaxy_map(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.max_rect();
             let painter = ui.painter_at(rect);
@@ -555,6 +618,9 @@ impl DriftApp {
             // System nodes.
             for s in self.reg.systems() {
                 let c = self.to_screen(s.position, rect);
+                if self.selected == Some(s.id) {
+                    painter.circle_stroke(c, 14.0, egui::Stroke::new(2.0_f32, SELECT));
+                }
                 painter.circle_filled(c, 10.0, danger_color(s.danger));
                 painter.circle_stroke(c, 10.0, egui::Stroke::new(1.0_f32, egui::Color32::WHITE));
                 painter.text(
@@ -595,8 +661,395 @@ impl DriftApp {
                     painter.circle_filled(p, 2.5, color);
                 }
             }
+
+            // Combat flashes: each recent fight pulses a fading, expanding ring at
+            // the system where it happened, so battles are visible on the map and
+            // not only in the log. Age is measured in (fractional) ticks off the
+            // current interpolated time, so flashes decay at sim speed and honour
+            // pause. Gated by the same per-category filters as the log.
+            for e in &self.view.events {
+                let Some(sys) = e.system else { continue };
+                if !is_combat(e.category) || !self.shows(e.category) {
+                    continue;
+                }
+                let age = now_f - e.tick.get() as f64;
+                if !(0.0..FLASH_LIFETIME).contains(&age) {
+                    continue;
+                }
+                let k = (1.0 - age / FLASH_LIFETIME) as f32; // 1 at birth -> 0 at death
+                let c = self.to_screen(self.reg.system(sys).position, rect);
+                let radius = 12.0 + (1.0 - k) * 26.0; // expands as it fades
+                let base = category_color(e.category);
+                let color =
+                    egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (k * 200.0) as u8);
+                painter.circle_stroke(c, radius, egui::Stroke::new(2.0_f32, color));
+            }
+
+            // Running battles: a persistent pulsing marker at each system where a
+            // multi-tick fight is under way, labelled with the live combatant count.
+            let pulse = 0.5 + 0.5 * ((now_f * 0.6).sin().abs());
+            for enc in &self.view.encounters {
+                let c = self.to_screen(self.reg.system(enc.system).position, rect);
+                let alive = enc.combatants.iter().filter(|cb| cb.alive).count();
+                painter.circle_stroke(c, 16.0 + 4.0 * pulse as f32, egui::Stroke::new(2.5_f32, BATTLE));
+                painter.text(
+                    egui::pos2(c.x, c.y + 16.0),
+                    egui::Align2::CENTER_TOP,
+                    format!("\u{2694} {alive}"),
+                    egui::FontId::proportional(12.0),
+                    BATTLE,
+                );
+            }
+
+            // Selection: click a node to open its market panel; a click on empty
+            // space closes it.
+            let response = ui.interact(rect, egui::Id::new("galaxy_click"), egui::Sense::click());
+            if response.clicked() {
+                if let Some(p) = response.interact_pointer_pos() {
+                    let hit = self.system_at(p, rect);
+                    self.selected = hit;
+                }
+            }
         });
     }
+
+    /// A floating panel for the selected system: its danger, market goods (price,
+    /// stock, equilibrium, and whether stock is a surplus or shortage), and the
+    /// production chains it runs. Read-only and mode-agnostic — the market data is
+    /// the same `view.markets` served locally or over the wire.
+    fn market_panel(&mut self, ctx: &egui::Context) {
+        let Some(sys) = self.selected else { return };
+        let reg = self.reg.clone();
+        let mut open = true;
+        egui::Window::new(format!("Market \u{2014} {}", reg.system_name(sys)))
+            .id(egui::Id::new("market_panel"))
+            .open(&mut open)
+            .default_width(320.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                let sdef = reg.system(sys);
+                ui.label(format!("Danger: {:.2}", sdef.danger));
+                ui.separator();
+
+                match self.view.markets.get(sys.0 as usize) {
+                    Some(market) if !market.goods.is_empty() => {
+                        egui::Grid::new("market_goods").striped(true).show(ui, |ui| {
+                            ui.strong("commodity");
+                            ui.strong("price");
+                            ui.strong("stock");
+                            ui.strong("equil");
+                            ui.strong("");
+                            ui.end_row();
+                            for (c, g) in &market.goods {
+                                ui.monospace(reg.commodity_name(*c));
+                                ui.monospace(format!("{}", g.price));
+                                ui.monospace(format!("{}", g.stock));
+                                ui.monospace(format!("{}", g.equilibrium));
+                                let (label, color) = stock_state(g.stock, g.equilibrium);
+                                ui.colored_label(color, label);
+                                ui.end_row();
+                            }
+                        });
+                    }
+                    _ => {
+                        ui.label("No market here.");
+                    }
+                }
+
+                ui.separator();
+                ui.strong("Production");
+                if sdef.industries.is_empty() {
+                    ui.label("No industries.");
+                } else {
+                    for &rid in &sdef.industries {
+                        let r = reg.recipe(rid);
+                        let inputs = fmt_amounts(&reg, &r.inputs);
+                        let outputs = fmt_amounts(&reg, &r.outputs);
+                        let lhs = if inputs.is_empty() { "\u{2217}".to_string() } else { inputs };
+                        ui.monospace(format!("{lhs} \u{2192} {outputs}"));
+                    }
+                }
+            });
+        if !open {
+            self.selected = None;
+        }
+    }
+
+    /// A floating panel listing the delivery-contract board: what to deliver,
+    /// where, the reward, and ticks left. When the client controls a trader, open
+    /// contracts get an **Accept** button, and a contract this trader holds gets a
+    /// **Fulfil** button once the trader is docked at the destination with the
+    /// cargo. Commands go through the same sink as the pilot panel and are
+    /// validated authoritatively, so the buttons can be issued optimistically.
+    fn contracts_panel(&mut self, ctx: &egui::Context) {
+        if !self.show_contracts {
+            return;
+        }
+        let reg = self.reg.clone();
+        let player = self.player;
+        let trader = find_player_trader(&self.view.traders, player).cloned();
+        let now = self.view.tick;
+        let mut open = true;
+        let mut pending: Option<Command> = None;
+
+        egui::Window::new("Contracts")
+            .id(egui::Id::new("contracts_panel"))
+            .open(&mut open)
+            .default_width(440.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                if trader.is_none() {
+                    ui.label("Launch a ship to take on contracts.");
+                    ui.separator();
+                }
+                if self.view.contracts.is_empty() {
+                    ui.label("No contracts on the board.");
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("contracts_grid").striped(true).show(ui, |ui| {
+                            ui.strong("task");
+                            ui.strong("to");
+                            ui.strong("reward");
+                            ui.strong("left");
+                            ui.strong("status");
+                            ui.strong("");
+                            ui.end_row();
+
+                            for c in &self.view.contracts {
+                                ui.monospace(contract_task(&reg, c));
+                                ui.monospace(reg.system_name(c.destination).to_string());
+                                ui.monospace(format!("{}cr", c.reward));
+                                ui.monospace(format!("{}t", c.deadline.get().saturating_sub(now)));
+
+                                match c.holder() {
+                                    None => {
+                                        ui.label("open");
+                                        if let Some(t) = &trader {
+                                            if ui.button("Accept").clicked() {
+                                                pending = Some(Command::AcceptContract {
+                                                    player,
+                                                    trader: t.id,
+                                                    contract: c.id,
+                                                });
+                                            }
+                                        } else {
+                                            ui.label("");
+                                        }
+                                    }
+                                    Some((p, tid)) => {
+                                        let ours = p == player
+                                            && trader.as_ref().map(|t| t.id) == Some(tid);
+                                        if ours {
+                                            ui.label("yours");
+                                            let ready = can_fulfill(trader.as_ref().unwrap(), c);
+                                            if ready && ui.button("Fulfil").clicked() {
+                                                pending = Some(Command::FulfillContract {
+                                                    player,
+                                                    trader: tid,
+                                                    contract: c.id,
+                                                });
+                                            } else if !ready {
+                                                ui.label("");
+                                            }
+                                        } else {
+                                            ui.label("taken");
+                                            ui.label("");
+                                        }
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+            });
+
+        self.show_contracts = open;
+        if let Some(cmd) = pending {
+            self.source.queue_command(cmd);
+        }
+    }
+
+    /// A floating panel for the financial layer: borrow against the player's
+    /// trader and repay outstanding loans. Commands go through the same sink as the
+    /// pilot panel and are validated authoritatively.
+    fn finance_panel(&mut self, ctx: &egui::Context) {
+        if !self.show_finance {
+            return;
+        }
+        let reg = self.reg.clone();
+        let player = self.player;
+        let trader = find_player_trader(&self.view.traders, player).cloned();
+        let now = self.view.tick;
+        let mut open = true;
+        let mut pending: Option<Command> = None;
+
+        egui::Window::new("Finance")
+            .id(egui::Id::new("finance_panel"))
+            .open(&mut open)
+            .default_width(360.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                let Some(t) = &trader else {
+                    ui.label("Launch a ship to use financial services.");
+                    return;
+                };
+                ui.label(format!("Capital: {} cr", t.capital));
+                let docked = matches!(t.location, TraderLocation::Docked(_));
+                if !docked {
+                    ui.label("(dock at a station to borrow)");
+                }
+                ui.separator();
+
+                ui.strong("Borrow");
+                ui.horizontal(|ui| {
+                    ui.add(egui::Slider::new(&mut self.borrow_amount, 100..=20_000).text("cr"));
+                    if ui.add_enabled(docked, egui::Button::new("Borrow")).clicked() {
+                        pending = Some(Command::TakeLoan {
+                            player,
+                            trader: t.id,
+                            principal: self.borrow_amount,
+                        });
+                    }
+                });
+                ui.separator();
+
+                ui.strong("Loans");
+                let mine: Vec<&Loan> =
+                    self.view.loans.iter().filter(|l| l.borrower == t.id).collect();
+                if mine.is_empty() {
+                    ui.label("No outstanding loans.");
+                } else {
+                    egui::Grid::new("loans_grid").striped(true).show(ui, |ui| {
+                        ui.strong("id");
+                        ui.strong("owed");
+                        ui.strong("due in");
+                        ui.strong("");
+                        ui.end_row();
+                        for l in &mine {
+                            ui.monospace(format!("#{}", l.id.0));
+                            ui.monospace(format!("{}cr", l.outstanding));
+                            ui.monospace(format!("{}t", l.due.get().saturating_sub(now)));
+                            // Repay as much as the balance and capital allow.
+                            let pay = t.capital.min(l.outstanding);
+                            if pay > 0 {
+                                if ui.button(format!("Repay {pay}")).clicked() {
+                                    pending = Some(Command::RepayLoan {
+                                        player,
+                                        trader: t.id,
+                                        loan: l.id,
+                                        amount: pay,
+                                    });
+                                }
+                            } else {
+                                ui.label("no funds");
+                            }
+                            ui.end_row();
+                        }
+                    });
+                }
+                ui.separator();
+
+                ui.strong("Insurance");
+                match self.view.policies.iter().find(|p| p.insured == t.id) {
+                    Some(p) => {
+                        ui.label(format!(
+                            "Covered for {}cr (lapses in {}t)",
+                            p.payout,
+                            p.expiry.get().saturating_sub(now)
+                        ));
+                    }
+                    None => {
+                        if ui.add_enabled(docked, egui::Button::new("Buy insurance")).clicked() {
+                            pending = Some(Command::BuyInsurance { player, trader: t.id });
+                        }
+                    }
+                }
+                ui.separator();
+
+                ui.strong("Futures");
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("future_commodity")
+                        .selected_text(reg.commodity_name(self.future_commodity).to_string())
+                        .show_ui(ui, |ui| {
+                            for (cid, def) in reg.commodities() {
+                                ui.selectable_value(&mut self.future_commodity, cid, &def.name);
+                            }
+                        });
+                    ui.add(egui::Slider::new(&mut self.future_qty, 1..=50).text("qty"));
+                });
+                ui.horizontal(|ui| {
+                    for (label, side) in [("Long", FutureSide::Long), ("Short", FutureSide::Short)] {
+                        if ui.add_enabled(docked, egui::Button::new(label)).clicked() {
+                            pending = Some(Command::OpenFuture {
+                                player,
+                                trader: t.id,
+                                commodity: self.future_commodity,
+                                qty: self.future_qty,
+                                side,
+                            });
+                        }
+                    }
+                });
+                let myf: Vec<&Future> =
+                    self.view.futures.iter().filter(|f| f.holder == t.id).collect();
+                if !myf.is_empty() {
+                    egui::Grid::new("futures_grid").striped(true).show(ui, |ui| {
+                        ui.strong("side");
+                        ui.strong("qty");
+                        ui.strong("commodity");
+                        ui.strong("strike");
+                        ui.strong("matures");
+                        ui.end_row();
+                        for f in &myf {
+                            ui.monospace(format!("{:?}", f.side));
+                            ui.monospace(format!("{}", f.quantity));
+                            ui.monospace(reg.commodity_name(f.commodity));
+                            ui.monospace(format!("{}cr", f.strike));
+                            ui.monospace(format!("{}t", f.maturity.get().saturating_sub(now)));
+                            ui.end_row();
+                        }
+                    });
+                }
+            });
+
+        self.show_finance = open;
+        if let Some(cmd) = pending {
+            self.source.queue_command(cmd);
+        }
+    }
+}
+
+/// A one-line description of what a contract asks for, for the board's "task"
+/// column (the destination is shown separately).
+fn contract_task(reg: &Registry, c: &Contract) -> String {
+    match c.kind {
+        ContractKind::Delivery { commodity, quantity } => {
+            format!("{quantity} {}", reg.commodity_name(commodity))
+        }
+        ContractKind::Courier => "courier parcel".to_string(),
+        ContractKind::Bounty { target, progress } => format!("bounty {progress}/{target}"),
+    }
+}
+
+/// Whether `trader` can fulfil `contract` right now: it holds the contract, is
+/// docked at the destination, and meets the kind's condition (cargo aboard for a
+/// delivery, quota met for a bounty, arrival alone for a courier). This is the
+/// panel's Fulfil-button gate, factored out for testing (the authoritative check
+/// still runs in the world when the command is applied).
+fn can_fulfill(trader: &Trader, contract: &Contract) -> bool {
+    if contract.held_by() != Some(trader.id) {
+        return false;
+    }
+    if !matches!(trader.location, TraderLocation::Docked(s) if s == contract.destination) {
+        return false;
+    }
+    let held = contract
+        .cargo()
+        .map_or(0, |(commodity, _)| trader.cargo.get(&commodity).copied().unwrap_or(0));
+    contract.condition_met(held)
 }
 
 /// The trader owned by `player`, if any — the ship this client controls. The
@@ -608,6 +1061,49 @@ fn find_player_trader(traders: &[Trader], player: PlayerId) -> Option<&Trader> {
 const TRADER: egui::Color32 = egui::Color32::from_rgb(90, 160, 255);
 const PIRATE: egui::Color32 = egui::Color32::from_rgb(230, 70, 70);
 const NAVY: egui::Color32 = egui::Color32::from_rgb(80, 220, 220);
+/// Highlight ring around the selected system node.
+const SELECT: egui::Color32 = egui::Color32::from_rgb(255, 220, 90);
+/// Marker for a running (multi-tick) battle at a system.
+const BATTLE: egui::Color32 = egui::Color32::from_rgb(255, 140, 40);
+/// Screen-pixel radius within which a click selects a system node.
+const NODE_PICK_RADIUS: f32 = 12.0;
+/// How many (fractional) ticks a combat flash remains visible before it fades
+/// out. Measured in ticks so flashes decay at simulation speed and freeze on pause.
+const FLASH_LIFETIME: f64 = 4.0;
+
+/// Whether an event category represents a fight (worth flashing on the map).
+/// `System` (respawns and other lifecycle notes) is not.
+fn is_combat(c: EventCategory) -> bool {
+    matches!(
+        c,
+        EventCategory::Combat | EventCategory::Piracy | EventCategory::Navy
+    )
+}
+
+/// Classify current stock against its equilibrium anchor, for the market panel:
+/// a large surplus reads cheap (green), a shortage dear (orange), else neutral.
+fn stock_state(stock: Quantity, equilibrium: Quantity) -> (&'static str, egui::Color32) {
+    if equilibrium == 0 {
+        return ("", egui::Color32::from_gray(150));
+    }
+    let ratio = stock as f64 / equilibrium as f64;
+    if ratio >= 1.25 {
+        ("surplus", egui::Color32::from_rgb(90, 200, 120))
+    } else if ratio <= 0.75 {
+        ("shortage", egui::Color32::from_rgb(230, 120, 90))
+    } else {
+        ("normal", egui::Color32::from_gray(150))
+    }
+}
+
+/// Render a recipe side (inputs or outputs) as "`qty name + qty name`".
+fn fmt_amounts(reg: &Registry, amounts: &[(CommodityId, Quantity)]) -> String {
+    amounts
+        .iter()
+        .map(|(c, q)| format!("{} {}", q, reg.commodity_name(*c)))
+        .collect::<Vec<_>>()
+        .join(" + ")
+}
 
 fn category_color(c: EventCategory) -> egui::Color32 {
     match c {
@@ -633,6 +1129,9 @@ impl eframe::App for DriftApp {
         self.player_panel(ctx);
         self.log_panel(ctx);
         self.galaxy_map(ctx);
+        self.market_panel(ctx);
+        self.contracts_panel(ctx);
+        self.finance_panel(ctx);
         // Keep animating (drives the local sim / picks up remote broadcasts).
         ctx.request_repaint();
     }
@@ -659,6 +1158,10 @@ mod tests {
             risk_aversion: 0.0,
             escort: None,
             navy: None,
+            contract: None,
+            loan: None,
+            insurance: None,
+            future: None,
         };
         let session = Session::new(reg, &scn, 1).unwrap();
         LocalSource { session, paused: false, speed: 10.0, accum: 0.0 }
@@ -691,6 +1194,123 @@ mod tests {
         s.speed = 1000.0;
         s.advance(100.0); // ~100k ticks requested; capped to avoid a spiral
         assert_eq!(s.session.world().tick_count().get() as u32, MAX_TICKS_PER_FRAME);
+    }
+
+    #[test]
+    fn system_at_picks_the_node_under_the_click() {
+        let mods = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mods");
+        let reg = load_registry(&mods).unwrap();
+        let scn = ScenarioDef {
+            name: "t".into(),
+            seed: 1,
+            ticks: 0,
+            traders: TraderSpawn { count: 0, ship: String::new(), starting_capital: 0 },
+            piracy: None,
+            risk_aversion: 0.0,
+            escort: None,
+            navy: None,
+            contract: None,
+            loan: None,
+            insurance: None,
+            future: None,
+        };
+        let session = Session::new(reg.clone(), &scn, 1).unwrap();
+        let app = DriftApp::local(reg, session);
+
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let sys = app.reg.system_id("core:lave").unwrap();
+
+        // The exact screen center of a node selects that system.
+        let center = app.to_screen(app.reg.system(sys).position, rect);
+        assert_eq!(app.system_at(center, rect), Some(sys));
+        // A point just inside the pick radius still hits.
+        let near = egui::pos2(center.x + NODE_PICK_RADIUS - 1.0, center.y);
+        assert_eq!(app.system_at(near, rect), Some(sys));
+        // A far-off point (well outside any node) selects nothing.
+        assert_eq!(app.system_at(egui::pos2(-500.0, -500.0), rect), None);
+    }
+
+    #[test]
+    fn only_fights_flash_on_the_map() {
+        // Combat/piracy/navy events flash; lifecycle (System) events do not.
+        assert!(is_combat(EventCategory::Combat));
+        assert!(is_combat(EventCategory::Piracy));
+        assert!(is_combat(EventCategory::Navy));
+        assert!(!is_combat(EventCategory::System));
+    }
+
+    #[test]
+    fn can_fulfill_requires_holder_location_and_cargo() {
+        use drift_economy::{ContractId, ContractState, TraderId};
+
+        let ship = ShipId(0);
+        let dest = SystemId(2);
+        let food = CommodityId(1);
+        let player = PlayerId(0);
+        let tid = TraderId(5);
+
+        let contract = Contract {
+            id: ContractId(1),
+            kind: ContractKind::Delivery { commodity: food, quantity: 10 },
+            destination: dest,
+            origin: SystemId(0),
+            reward: 500,
+            deadline: Tick(100),
+            state: ContractState::Accepted { player, trader: tid },
+        };
+
+        // Holder, docked at the destination, carrying enough: ready.
+        let mut ready = Trader::owned(tid, ship, 1000, dest, player);
+        ready.cargo.insert(food, 10);
+        assert!(can_fulfill(&ready, &contract));
+
+        // One unit short.
+        let mut short = Trader::owned(tid, ship, 1000, dest, player);
+        short.cargo.insert(food, 9);
+        assert!(!can_fulfill(&short, &contract));
+
+        // Laden, but docked at the wrong system.
+        let mut elsewhere = Trader::owned(tid, ship, 1000, SystemId(3), player);
+        elsewhere.cargo.insert(food, 10);
+        assert!(!can_fulfill(&elsewhere, &contract));
+
+        // A different trader is not the holder, even if co-located and laden.
+        let mut other = Trader::owned(TraderId(9), ship, 1000, dest, player);
+        other.cargo.insert(food, 10);
+        assert!(!can_fulfill(&other, &contract));
+
+        // An open (unheld) contract is never fulfillable.
+        let open = Contract { state: ContractState::Open, ..contract.clone() };
+        assert!(!can_fulfill(&ready, &open));
+
+        // A courier is fulfillable on arrival alone (no cargo needed).
+        let courier = Contract {
+            kind: ContractKind::Courier,
+            ..contract.clone()
+        };
+        let empty = Trader::owned(tid, ship, 1000, dest, player);
+        assert!(can_fulfill(&empty, &courier));
+
+        // A bounty needs its quota met, regardless of cargo.
+        let unmet = Contract {
+            kind: ContractKind::Bounty { target: 3, progress: 2 },
+            ..contract.clone()
+        };
+        assert!(!can_fulfill(&empty, &unmet));
+        let met = Contract {
+            kind: ContractKind::Bounty { target: 3, progress: 3 },
+            ..contract.clone()
+        };
+        assert!(can_fulfill(&empty, &met));
+    }
+
+    #[test]
+    fn stock_state_classifies_surplus_and_shortage() {
+        assert_eq!(stock_state(200, 100).0, "surplus");
+        assert_eq!(stock_state(50, 100).0, "shortage");
+        assert_eq!(stock_state(100, 100).0, "normal");
+        // A zero anchor is unclassifiable, not a divide-by-zero.
+        assert_eq!(stock_state(10, 0).0, "");
     }
 
     #[test]

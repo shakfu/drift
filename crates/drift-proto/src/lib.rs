@@ -19,7 +19,10 @@
 
 use std::io::{self, Read, Write};
 
-use drift_economy::{Command, Market, Patrol, PiracyStats, SimEvent, Trader};
+use drift_economy::{
+    Command, Contract, EncounterView, Future, Loan, Market, Patrol, PiracyStats, Policy, SimEvent,
+    Trader,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +75,22 @@ pub struct WorldView {
     pub navy: Vec<Patrol>,
     /// Cumulative piracy tallies.
     pub piracy: PiracyStats,
+    /// The live delivery-contract board. `#[serde(default)]` so a snapshot from a
+    /// server without contracts (an empty or absent field) still deserializes.
+    #[serde(default)]
+    pub contracts: Vec<Contract>,
+    /// Outstanding loans against traders' capital.
+    #[serde(default)]
+    pub loans: Vec<Loan>,
+    /// Active insurance policies.
+    #[serde(default)]
+    pub policies: Vec<Policy>,
+    /// Open futures positions.
+    #[serde(default)]
+    pub futures: Vec<Future>,
+    /// Battles currently playing out across ticks (for animating live combat).
+    #[serde(default)]
+    pub encounters: Vec<EncounterView>,
 }
 
 impl WorldView {
@@ -173,5 +192,10 @@ mod tests {
         assert_eq!(view.pirates.len(), world.pirates().len());
         assert_eq!(view.navy.len(), world.navy().len());
         assert_eq!(view.piracy, world.piracy_stats());
+        assert_eq!(view.contracts.as_slice(), world.contracts());
+        assert_eq!(view.loans.as_slice(), world.loans());
+        assert_eq!(view.policies.as_slice(), world.policies());
+        assert_eq!(view.futures.as_slice(), world.futures());
+        assert_eq!(view.encounters, world.encounter_views());
     }
 }

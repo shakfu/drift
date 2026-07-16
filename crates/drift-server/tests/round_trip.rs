@@ -35,6 +35,10 @@ fn sandbox_scenario() -> ScenarioDef {
         risk_aversion: 0.0,
         escort: None,
         navy: None,
+        contract: None,
+        loan: None,
+        insurance: None,
+        future: None,
     }
 }
 

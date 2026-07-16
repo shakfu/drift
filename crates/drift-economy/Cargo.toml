@@ -10,6 +10,7 @@ drift-core = { workspace = true }
 drift-data = { workspace = true }
 drift-mods = { workspace = true }
 drift-combat = { workspace = true }
+drift-script = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

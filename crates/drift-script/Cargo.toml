@@ -1,0 +1,11 @@
+[package]
+name = "drift-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+drift-core = { workspace = true }
+rhai = { workspace = true }
+thiserror = { workspace = true }

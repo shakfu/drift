@@ -13,6 +13,14 @@ use drift_core::{ShipId, SystemId, Tick};
 use drift_data::CombatStats;
 use serde::{Deserialize, Serialize};
 
+/// A stable, never-reused handle for a patrol (pirate or navy ship), so a running
+/// battle can refer to its participants across ticks even as fleets are culled and
+/// reinforced. Same discipline as `TraderId`/`ContractId`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct PatrolId(pub u64);
+
 /// Where a patrol is right now. (No "destroyed" state — dead agents are removed.)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PatrolLocation {
@@ -30,6 +38,8 @@ pub enum PatrolLocation {
 /// A persistent roaming ship (pirate or navy).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Patrol {
+    /// Stable handle (see [`PatrolId`]).
+    pub id: PatrolId,
     pub ship: ShipId,
     pub location: PatrolLocation,
     /// Persistent hull; `<= 0` marks the agent for removal.
@@ -40,8 +50,9 @@ pub struct Patrol {
 
 impl Patrol {
     /// Spawn a fresh, undamaged agent docked at `at`.
-    pub fn new(ship: ShipId, stats: &CombatStats, hull: u32, at: SystemId) -> Self {
+    pub fn new(id: PatrolId, ship: ShipId, stats: &CombatStats, hull: u32, at: SystemId) -> Self {
         Self {
+            id,
             ship,
             location: PatrolLocation::Docked(at),
             hull: hull as i32,

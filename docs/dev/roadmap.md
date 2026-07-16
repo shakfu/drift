@@ -7,23 +7,41 @@ Forward-looking plan for `drift`. For the current state, see
 
 Ordered by dependency and value from the current headless simulation:
 
-1. **Graphical observer client** — SCAFFOLDED (`drift-client`, egui/eframe). A live
+1. **Graphical observer client** — DONE (`drift-client`, egui/eframe). A live
    galaxy-map view (systems coloured by danger, jump edges, pause/speed controls,
    piracy HUD) over a fixed-timestep sim loop, with agents **animated along jump
-   edges** (interpolated from `InTransit { origin, departure }`). Next: market
-   panels on node selection, and combat-event flashes. Detailed strategy below.
+   edges** (interpolated from `InTransit { origin, departure }`), per-node market
+   panels, on-map combat flashes, and a contracts panel. Only real-display
+   verification remains (no GUI in the dev sandbox). Detailed strategy below.
 2. **Player agent** — DONE (interactive CLI). `drift play` lets a human fly a
    trader through the living galaxy over the command pipeline (buy/sell/jump/wait),
    with pirate ambushes and bounties narrated in transit. See `drift-cli/src/play.rs`.
    A graphical player client is a later layer on the same commands.
-3. **Missions and contracts** — cargo runs, bounty contracts, courier jobs, riding
-   on the existing bounty and economy plumbing.
-4. **Financial instruments** — futures, loans, insurance on the working spot
-   economy; escort fees and navy funding as real economic costs (protection is
-   currently free).
-5. **WASM/Lua scripting** — mod-authored behavior through the existing name seam.
-6. **Multi-tick running battles** — combat that plays out over several ticks
-   instead of resolving instantly (also improves what a client can show).
+3. **Missions and contracts** — DONE. One board with three `ContractKind`s —
+   delivery (cargo runs from market shortfalls), courier (parcel runs), and bounty
+   (pirate kills, credited from ambush wins) — taken and completed through the
+   command pipeline (`AcceptContract`/`FulfillContract`), on the `Snapshot`/
+   `WorldView` wire, with a `drift-client` panel and `drift play` support.
+4. **Financial instruments** — DONE (core three). `drift-economy::finance` has
+   loans (`TakeLoan`/`RepayLoan`, interest + called defaults), insurance
+   (`BuyInsurance`, payout on a covered loss), and futures (`OpenFuture`,
+   cash-settled against the reference price at maturity) — all settled in a
+   `finance_phase`, on the `Snapshot`/`WorldView` wire, with a client Finance panel
+   and `drift play` commands. Still open under this theme: escort fees and navy
+   funding as real economic costs (protection is currently free).
+5. **Mod scripting** — IN PROGRESS. Engine chosen and de-risked: **Rhai** (pure
+   Rust, sandboxed by construction, operation-limited), in the new `drift-script`
+   crate, with a `ScriptedPricing` hook proven deterministic/sandboxed/fuel-limited
+   by tests. `wasmi` is the hardening swap-in behind the same seam if
+   lockstep-across-clients determinism is ever required. Next: wire scripted
+   strategies through the `NamedRegistry` seam and load `.rhai` from mod manifests.
+6. **Multi-tick running battles** — DONE. Encounters now play out over several
+   economy ticks: `drift-combat`'s `Encounter` is serializable and steppable, and
+   the world advances `ActiveEncounter`s (each with its own RNG, participants keyed
+   by stable `PatrolId`) a few steps per tick in a `combat_phase`, freezing engaged
+   agents and applying outcomes on completion. This is the headless "running-battle
+   model" the eventual real-time/3-D combat layer will build on; the client can now
+   read a fight's live positions to animate it.
 
 The graphical client is first because it is read-only over an interface that
 already exists, and it unblocks the player agent.
@@ -75,7 +93,9 @@ adding a game engine means flying a spaceship.
 **Recommendation:** build (A) now; treat (B) as a later, separate milestone that
 adds a real-time local layer. Combat already has 2-D kinematics
 (`Encounter`/`Combatant`) that could seed a local battle view, but everything
-between systems is abstract.
+between systems is abstract. (A) is now built; the Bevy 3-D flight/combat scoping
+for (B) — architecture, the determinism firewall, and staged milestones M1–M4 — is
+in [flight-combat.md](./flight-combat.md).
 
 ### Engine choice
 

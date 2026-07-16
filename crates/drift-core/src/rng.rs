@@ -40,6 +40,13 @@ impl DetRng {
         self.inner.gen::<f64>()
     }
 
+    /// A full 64-bit draw — used to seed an independent child RNG deterministically
+    /// (e.g. one per running battle, so a fight's evolution is isolated from what
+    /// else happens between ticks).
+    pub fn next_u64(&mut self) -> u64 {
+        self.inner.gen::<u64>()
+    }
+
     /// Deterministic tie-break helper: pick an index in `[0, len)`, or `None`
     /// when `len == 0`.
     pub fn choose_index(&mut self, len: usize) -> Option<usize> {

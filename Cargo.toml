@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/drift-core",
     "crates/drift-data",
+    "crates/drift-script",
     "crates/drift-mods",
     "crates/drift-economy",
     "crates/drift-combat",
@@ -11,6 +12,7 @@ members = [
     "crates/drift-server",
     "crates/drift-cli",
     "crates/drift-client",
+    "crates/drift-flight",
 ]
 
 [workspace.package]
@@ -30,6 +32,11 @@ drift-combat = { path = "crates/drift-combat" }
 drift-sim = { path = "crates/drift-sim" }
 drift-proto = { path = "crates/drift-proto" }
 drift-server = { path = "crates/drift-server" }
+drift-script = { path = "crates/drift-script" }
+
+# Scripting (mod-authored behavior). Pure Rust, sandboxed by construction, with
+# built-in operation limiting — see docs/dev and drift-script for the rationale.
+rhai = { version = "1", features = ["sync"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

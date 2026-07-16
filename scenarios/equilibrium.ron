@@ -23,9 +23,52 @@
     // Traders weigh danger when routing: valuable runs into lawless space are
     // discounted, so they lose fewer ships (but underserve the frontier).
     risk_aversion: 1.0,
-    // Every convoy hires one escort fighter for protection in an ambush.
-    escort: Some((ship: "core:escort", count: 1)),
+    // Every convoy hires one escort fighter for protection in an ambush, paying a
+    // fee per jump — protection is a running cost, not free.
+    escort: Some((ship: "core:escort", count: 1, fee: 30)),
     // A navy fleet patrols the lawless frontier, hunting pirates and defending
-    // traders under attack.
-    navy: Some((ship: "core:navy", fleet_size: 6, reinforce_interval: 40)),
+    // traders under attack. It costs upkeep per ship, funded from the treasury; if
+    // funding runs short the fleet cannot reinforce and shrinks under losses.
+    navy: Some((ship: "core:navy", fleet_size: 6, reinforce_interval: 40, upkeep: 3, funding: 25)),
+    // A delivery-contract board: systems starved of a good post import missions
+    // (a premium over the local spot price) that a player can take on. Generated
+    // from live shortages, so the board tracks where the economy is under strain.
+    contract: Some((
+        max_open: 6,
+        generation_interval: 20,
+        deadline_ticks: 300,
+        reward_factor: 1.25,
+        min_shortfall: 30,
+        max_quantity: 40,
+        // Bounty contracts (destroy pirates near a lawless system) and courier
+        // runs (carry a parcel between systems) round out the board alongside the
+        // shortage-driven delivery contracts.
+        bounty_target: 3,
+        bounty_reward: 2500,
+        courier_reward: 400,
+    )),
+    // A bank offers loans to docked traders: borrow to lever up a promising run,
+    // at the risk of a debt spiral if it turns. 1% interest per 50 ticks, due in
+    // 500, called (balance seized) if unpaid.
+    loan: Some((
+        rate_bps: 100,
+        accrual_interval: 50,
+        term_ticks: 500,
+        max_principal: 20000,
+        max_loans: 3,
+    )),
+    // Ship-loss insurance: a premium buys a payout if pirates destroy the ship.
+    insurance: Some((
+        premium: 400,
+        payout: 5000,
+        term_ticks: 400,
+    )),
+    // A cash-settled commodity-futures market: bet on where prices are heading,
+    // settled against the galaxy reference price at maturity.
+    future: Some((
+        fee: 150,
+        term_ticks: 250,
+        max_quantity: 40,
+        max_futures: 3,
+    )),
 )

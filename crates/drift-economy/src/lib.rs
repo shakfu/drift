@@ -6,7 +6,9 @@
 //! whose arbitrage self-corrects prices toward equilibrium.
 
 pub mod command;
+pub mod contract;
 pub mod event;
+pub mod finance;
 pub mod market;
 pub mod patrol;
 pub mod pricing;
@@ -15,9 +17,11 @@ pub mod trader;
 pub mod world;
 
 pub use command::{Command, CommandError, Owner, PlayerId};
+pub use contract::{Contract, ContractId, ContractKind, ContractState};
 pub use event::{EventCategory, SimEvent};
+pub use finance::{Future, FutureSide, Loan, LoanId, Policy};
 pub use market::{Market, MarketGood};
-pub use patrol::{Patrol, PatrolLocation};
-pub use pricing::{builtin_pricing, PricingStrategy};
+pub use patrol::{Patrol, PatrolId, PatrolLocation};
+pub use pricing::{builtin_pricing, PricingSet, PricingStrategy};
 pub use trader::{choose_trade, Trader, TraderId, TraderLocation, TradePlan};
-pub use world::{PiracyStats, Snapshot, World, WorldError};
+pub use world::{EncounterView, PiracyStats, Snapshot, World, WorldError};

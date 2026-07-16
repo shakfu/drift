@@ -18,9 +18,17 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 /// A name-keyed registry of behavior handlers.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NamedRegistry<H> {
     handlers: HashMap<String, H>,
+}
+
+// An empty registry needs no `H: Default`, so implement `Default` by hand rather
+// than deriving it (the derive would over-constrain the handler type).
+impl<H> Default for NamedRegistry<H> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Raised when content references a strategy name that was never registered.

@@ -1,0 +1,26 @@
+[package]
+name = "drift-flight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# The 3-D flight/combat client (M1: combat spectator). The Bevy app is gated behind
+# the `gui` feature so the default workspace build/test/lint stays fast and free of
+# the heavy graphics dependency; the engine-agnostic scene model always builds.
+[dependencies]
+drift-core = { workspace = true }
+drift-economy = { workspace = true }
+drift-mods = { workspace = true }
+drift-sim = { workspace = true, optional = true }
+# glam is the math library Bevy itself uses; matching the version lets the tested,
+# engine-agnostic flight model share vector/quaternion types with the Bevy app.
+glam = "0.29"
+bevy = { version = "0.16", optional = true }
+
+[features]
+gui = ["dep:bevy", "dep:drift-sim"]
+
+[[bin]]
+name = "drift-flight"
+required-features = ["gui"]

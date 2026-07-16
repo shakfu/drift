@@ -8,6 +8,7 @@
 //! consumer of core's per-tick seam.
 
 use drift_core::{DetRng, SimContext, Step, Tick};
+use serde::{Deserialize, Serialize};
 
 use crate::combatant::Combatant;
 use crate::math::Vec2;
@@ -27,7 +28,7 @@ pub enum Outcome {
 }
 
 /// A battle in progress.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Encounter {
     pub combatants: Vec<Combatant>,
 }
@@ -92,7 +93,16 @@ impl Encounter {
     /// Run the encounter to a decision or until `max_ticks` elapse, drawing
     /// randomness from `rng`. Returns the final outcome.
     pub fn resolve(&mut self, rng: &mut DetRng, max_ticks: u64) -> Outcome {
-        for t in 0..max_ticks {
+        self.advance(rng, max_ticks)
+    }
+
+    /// Advance the encounter by up to `steps` ticks, stopping early if it decides,
+    /// and return the current outcome. This is the per-tick seam a running-battle
+    /// host uses to spread a fight across several simulation ticks (`resolve` is
+    /// the special case of advancing to completion in one call). The combat tick
+    /// counter is local to the encounter and only feeds the RNG-bearing context.
+    pub fn advance(&mut self, rng: &mut DetRng, steps: u64) -> Outcome {
+        for t in 0..steps {
             if self.outcome() != Outcome::Ongoing {
                 break;
             }
