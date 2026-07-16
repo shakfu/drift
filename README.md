@@ -1,6 +1,6 @@
 # drift
 
-A Rust take on the Elite/Oolite space sim: **real-time piloted space combat and flight on top of a deep, deterministic trading economy and a mod system.** Drift began as a headless economy core and has grown into a playable 3-D flight client, a mod-scripting runtime, a player/mission/finance layer, and a server-authoritative multiplayer scaffold — all driven by one deterministic simulation.
+An initial Rust take on the Elite/Oolite space sim: **real-time piloted space combat and flight on top of a deep, deterministic trading economy and a mod system.** Drift began as a headless economy core and has grown into a 3-D flight client, a mod-scripting runtime, a player/mission/finance layer, and a server-authoritative multiplayer scaffold — all driven by one deterministic simulation.
 
 The architecture keeps a hard line between two clocks. The **abstract galaxy simulation** is deterministic, headless, and testable — the source of truth for the economy, piracy, and every NPC agent. The **real-time flight layer** (the Bevy client) is where you personally fly and fight. The flight layer *reads* sim state and reports outcomes back only as validated commands, so the core stays byte-for-byte deterministic no matter what happens in the cockpit. This "two clocks, one authority" firewall is the load-bearing design decision.
 
