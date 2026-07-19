@@ -13,7 +13,21 @@ use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use crate::error::LoadError;
-use crate::manifest::{Manifest, ModDir};
+use crate::manifest::{Manifest, ModDir, ScriptKind};
+
+/// A mod-declared behavior script, read from disk: the name it registers, the
+/// seam it plugs into, and its `.rhai` source.
+///
+/// Kept as *source* rather than a compiled artefact so `drift-mods` stays free of
+/// the scripting engine (the loader validates content; the host compiles and runs
+/// scripts). The `mod_id` is retained for diagnostics.
+#[derive(Debug, Clone)]
+pub struct LoadedScript {
+    pub name: String,
+    pub kind: ScriptKind,
+    pub source: String,
+    pub mod_id: String,
+}
 
 /// All content merged across mods, in deterministic load order, still keyed by
 /// string ids (not yet linked to runtime handles).
@@ -23,6 +37,7 @@ pub struct MergedContent {
     pub recipes: Vec<ProductionRecipe>,
     pub systems: Vec<SystemDef>,
     pub ships: Vec<ShipDef>,
+    pub scripts: Vec<LoadedScript>,
 }
 
 /// Discover every `manifest.toml` directly under `root`'s subdirectories.
@@ -220,6 +235,12 @@ pub fn load(root: &Path) -> Result<MergedContent, LoadError> {
     let mut systems_per_mod = Vec::new();
     let mut ships_per_mod = Vec::new();
 
+    // Scripts declared in manifests, read from disk. Names must be unique across
+    // all mods (a collision is as fatal as a duplicate content id). Scripts do not
+    // participate in the content `overrides` mechanism.
+    let mut scripts: Vec<LoadedScript> = Vec::new();
+    let mut script_owner: HashMap<String, String> = HashMap::new();
+
     for m in &mods {
         commodities_per_mod.push((
             m.manifest.id.clone(),
@@ -241,6 +262,29 @@ pub fn load(root: &Path) -> Result<MergedContent, LoadError> {
             &m.manifest,
             load_dir::<ShipDef>(&m.dir, "ships")?,
         ));
+
+        for entry in &m.manifest.scripts {
+            if let Some(first) = script_owner.get(&entry.name) {
+                return Err(LoadError::DuplicateId {
+                    kind: "script",
+                    id: entry.name.clone(),
+                    first: first.clone(),
+                    second: m.manifest.id.clone(),
+                });
+            }
+            let path = m.dir.join(&entry.path);
+            let source = std::fs::read_to_string(&path).map_err(|source| LoadError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            script_owner.insert(entry.name.clone(), m.manifest.id.clone());
+            scripts.push(LoadedScript {
+                name: entry.name.clone(),
+                kind: entry.kind,
+                source,
+                mod_id: m.manifest.id.clone(),
+            });
+        }
     }
 
     Ok(MergedContent {
@@ -248,5 +292,6 @@ pub fn load(root: &Path) -> Result<MergedContent, LoadError> {
         recipes: merge("recipe", recipes_per_mod, |r| r.id.as_str())?,
         systems: merge("system", systems_per_mod, |s| s.id.as_str())?,
         ships: merge("ship", ships_per_mod, |s| s.id.as_str())?,
+        scripts,
     })
 }

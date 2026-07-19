@@ -190,8 +190,13 @@ network is just an alternate state source.
   departure, arrival }` fields make this a pure lerp along the jump edge).
 - **Static content is local.** Only mutable state is sent; the client loads the
   same mods locally for system positions, names, danger, and jump edges. Identical
-  content means identical interning, so market/system indices align. (A production
-  build would send a content hash to detect mismatches — deferred.)
+  content means identical interning, so market/system indices align. A
+  **content-version handshake** enforces that invariant: on connect the client
+  sends `Registry::content_hash()` (a fixed FNV-1a fingerprint of the fully-linked
+  data in interned order) as a `ClientMessage::Hello`, and the server refuses a
+  mismatch with a `ServerMessage::Reject` before the client ever enters the sim.
+  Mismatched mods therefore fail loudly at connect instead of silently rendering a
+  desynced world.
 - **Player controls.** A "Pilot" panel drives the command path from the UI:
   launch a ship, then buy/sell against the docked market, jump to a connected
   system, or retire. It issues through one command sink — queued on the local

@@ -59,6 +59,7 @@ fn l1(a: &[f64], b: &[f64]) -> f64 {
 /// a short jump. `_c` marks the commodity index for readers.
 fn two_system_registry() -> Arc<Registry> {
     let merged = MergedContent {
+        scripts: vec![],
         commodities: vec![CommodityDef {
             id: "t:food".into(),
             name: "Food".into(),
@@ -125,6 +126,7 @@ fn two_system_registry() -> Arc<Registry> {
             hull: 100,
             max_speed: 100.0,
             combat: None,
+            visual: None,
         }],
     };
     Arc::new(link(merged, &pricing_names()).expect("inline registry links"))
@@ -200,6 +202,7 @@ fn price_at(world: &World, system: &str, commodity: &str) -> f64 {
 /// demand backs off as the good gets dear. No traders, no neighbours.
 fn single_system_registry(consumer_elasticity: f64) -> Arc<Registry> {
     let merged = MergedContent {
+        scripts: vec![],
         commodities: vec![CommodityDef {
             id: "t:x".into(),
             name: "X".into(),
@@ -245,6 +248,7 @@ fn single_system_registry(consumer_elasticity: f64) -> Arc<Registry> {
             hull: 1,
             max_speed: 1.0,
             combat: None,
+            visual: None,
         }],
     };
     Arc::new(link(merged, &pricing_names()).expect("single-system registry links"))
@@ -331,6 +335,79 @@ fn full_galaxy_prices_converge() {
     for p in price_vector(&world) {
         assert!(p.is_finite() && p > 0.0, "price {p} out of bounds");
     }
+}
+
+// B2: manufacturing capacity is a live, convergent investment dynamic.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn manufacturing_capacity_invests_and_settles() {
+    use drift_economy::production::{has_capacity, MAX_CAPACITY, MIN_CAPACITY};
+
+    let reg = Arc::new(load_and_link(&core_mods_path(), &pricing_names()).expect("core mod links"));
+    let scn = scenario(24, "core:cobra_mk3", 5000);
+    let pricing = builtin_pricing();
+    let mut world = World::new(reg.clone(), &scn, 42, &pricing).unwrap();
+
+    // A flat snapshot of the capacity field, for movement measurement.
+    let snap = |w: &World| -> Vec<f64> { w.capacity().iter().flatten().copied().collect() };
+
+    // Sample capacity movement in an early vs. a late window: capital should surge
+    // as it first chases returns, then settle. (Mirrors the price-convergence test.)
+    const STEP: u64 = 50;
+    const SAMPLES: u64 = 80; // 4000 ticks
+    let mut prev = snap(&world);
+    let mut early = 0.0;
+    let mut late = 0.0;
+    for i in 0..SAMPLES {
+        world.run(STEP);
+        let cur = snap(&world);
+        let movement = l1(&prev, &cur);
+        if i < SAMPLES / 4 {
+            early += movement;
+        } else if i >= SAMPLES * 3 / 4 {
+            late += movement;
+        }
+        prev = cur;
+    }
+
+    // 1. Every capacity stays within the capital bounds.
+    for &c in &snap(&world) {
+        assert!(
+            (MIN_CAPACITY..=MAX_CAPACITY).contains(&c),
+            "capacity {c} escaped [{MIN_CAPACITY}, {MAX_CAPACITY}]"
+        );
+    }
+
+    // 2. Only manufacturing (transformer) industries invest; raw extractors and
+    //    consumers hold nominal capacity exactly. And at least one manufacturing
+    //    industry actually moved — the dynamic is live, not inert.
+    let mut manufacturing_moved = false;
+    for (si, sys) in reg.systems().enumerate() {
+        for (j, &rid) in sys.industries.iter().enumerate() {
+            let cap = world.capacity()[si][j];
+            if has_capacity(reg.recipe(rid)) {
+                if (cap - 1.0).abs() > 0.05 {
+                    manufacturing_moved = true;
+                }
+            } else {
+                assert!(
+                    (cap - 1.0).abs() < 1e-9,
+                    "a non-transformer industry drifted to capacity {cap}, expected 1.0"
+                );
+            }
+        }
+    }
+    assert!(
+        manufacturing_moved,
+        "no manufacturing capacity moved off nominal — the investment dynamic is inert"
+    );
+
+    // 3. Capital converges: late-window movement is a fraction of the early surge.
+    assert!(
+        late < early * 0.5,
+        "capacity did not settle: early movement {early:.3}, late movement {late:.3}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -811,6 +888,47 @@ fn player_can_spawn_and_trade_via_commands() {
         TraderLocation::InTransit { dest, .. } if dest == leesti
     ));
     assert_eq!(w.commands_rejected(), 0, "no command should have been rejected");
+}
+
+#[test]
+fn scooped_cargo_is_added_free_and_capped_by_the_hold() {
+    let reg = Arc::new(load_and_link(&core_mods_path(), &pricing_names()).expect("core mod links"));
+    let pricing = builtin_pricing();
+    let scn = scenario(0, "core:cobra_mk3", 5000);
+    let mut w = World::new(reg.clone(), &scn, 1, &pricing).unwrap();
+
+    let player = PlayerId(0);
+    let ship = reg.ship_id("core:cobra_mk3").unwrap();
+    let lave = reg.system_id("core:lave").unwrap();
+    let food = reg.commodity_id("core:food").unwrap();
+
+    w.queue_command(Command::Spawn { player, ship, at: lave, capital: 5000 });
+    w.tick();
+    let tid = player_trader_id(&w, player);
+    let cap_before = w.traders()[0].capital;
+
+    // Scoop a small canister: added to the hold, free of charge.
+    w.queue_command(Command::ScoopCargo { player, trader: tid, commodity: food, qty: 3 });
+    w.tick();
+    assert_eq!(w.traders()[0].cargo.get(&food).copied(), Some(3), "scoop fills the hold");
+    assert_eq!(w.traders()[0].capital, cap_before, "scooping is free");
+
+    // A huge scoop is capped at what the hold can carry (Cobra capacity 35, food
+    // mass 1), not the full requested amount.
+    w.queue_command(Command::ScoopCargo { player, trader: tid, commodity: food, qty: 10_000 });
+    w.tick();
+    let capacity = reg.ship(ship).cargo_capacity;
+    assert_eq!(
+        w.traders()[0].cargo.get(&food).copied(),
+        Some(capacity),
+        "scoop is capped by the hold, not the request"
+    );
+
+    // A full hold rejects a further scoop.
+    let rejected_before = w.commands_rejected();
+    w.queue_command(Command::ScoopCargo { player, trader: tid, commodity: food, qty: 1 });
+    w.tick();
+    assert_eq!(w.commands_rejected(), rejected_before + 1, "a full hold rejects the scoop");
 }
 
 #[test]
@@ -1356,6 +1474,7 @@ fn courier_contracts_are_generated_and_fulfilled_on_arrival() {
 /// deterministic win — enough to drive a bounty to completion.
 fn dangerous_reg() -> Arc<Registry> {
     let merged = MergedContent {
+        scripts: vec![],
         commodities: vec![CommodityDef {
             id: "t:food".into(),
             name: "Food".into(),
@@ -1419,6 +1538,7 @@ fn dangerous_reg() -> Arc<Registry> {
                     accuracy: 1.0,
                     acceleration: 1000.0,
                 }),
+                visual: None,
             },
             ShipDef {
                 id: "t:pirate".into(),
@@ -1427,7 +1547,8 @@ fn dangerous_reg() -> Arc<Registry> {
                 jump_speed: 100.0,
                 hull: 1,
                 max_speed: 1.0,
-                combat: None, // unarmed: deals no damage
+                combat: None, // unarmed: deals no damage,
+                visual: None,
             },
         ],
     };
@@ -1749,6 +1870,7 @@ fn lending_unavailable_without_a_loan_config() {
 /// into Bport is destroyed deterministically.
 fn deadly_reg() -> Arc<Registry> {
     let merged = MergedContent {
+        scripts: vec![],
         commodities: vec![CommodityDef {
             id: "t:food".into(),
             name: "Food".into(),
@@ -1803,7 +1925,8 @@ fn deadly_reg() -> Arc<Registry> {
                 jump_speed: 100.0,
                 hull: 10,
                 max_speed: 10.0,
-                combat: None, // unarmed prey
+                combat: None, // unarmed prey,
+                visual: None,
             },
             ShipDef {
                 id: "t:raider".into(),
@@ -1821,6 +1944,7 @@ fn deadly_reg() -> Arc<Registry> {
                     accuracy: 1.0,
                     acceleration: 100.0,
                 }),
+                visual: None,
             },
         ],
     };
@@ -1923,6 +2047,7 @@ fn insurance_commands_are_validated() {
 /// traders, the reference price never moves — so a future settles flat.
 fn static_reg() -> Arc<Registry> {
     let merged = MergedContent {
+        scripts: vec![],
         commodities: vec![CommodityDef {
             id: "t:widget".into(),
             name: "Widget".into(),
@@ -1950,6 +2075,7 @@ fn static_reg() -> Arc<Registry> {
             hull: 100,
             max_speed: 100.0,
             combat: None,
+            visual: None,
         }],
     };
     Arc::new(link(merged, &pricing_names()).expect("static registry links"))
@@ -2105,8 +2231,10 @@ fn grind_reg() -> Arc<Registry> {
             accuracy: 0.8,
             acceleration: 40.0,
         }),
+        visual: None,
     };
     let merged = MergedContent {
+        scripts: vec![],
         commodities: vec![CommodityDef {
             id: "t:food".into(),
             name: "Food".into(),
@@ -2333,6 +2461,7 @@ fn a_scripted_pricing_strategy_drives_the_market() {
 
     // A one-system galaxy whose market selects the scripted strategy by name.
     let merged = MergedContent {
+        scripts: vec![],
         commodities: vec![CommodityDef {
             id: "t:widget".into(),
             name: "Widget".into(),
@@ -2360,6 +2489,7 @@ fn a_scripted_pricing_strategy_drives_the_market() {
             hull: 1,
             max_speed: 1.0,
             combat: None,
+            visual: None,
         }],
     };
     let reg = Arc::new(link(merged, &known).expect("links with the scripted strategy registered"));

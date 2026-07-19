@@ -21,5 +21,5 @@ pub use scenario::{
     ContractConfig, EscortConfig, FutureConfig, InsuranceConfig, LoanConfig, NavyConfig,
     PiracyConfig, ScenarioDef, TraderSpawn,
 };
-pub use ship::{CombatStats, ShipDef};
+pub use ship::{CombatStats, HullShape, ShipDef, ShipVisual};
 pub use system::SystemDef;

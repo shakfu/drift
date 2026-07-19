@@ -166,7 +166,15 @@ the sim live" cheaply.*
    real-time entities; jump/dock feed the sim as commands.
 3. **M3 — single-player real-time combat.** The player fights in real time; the
    flight layer is authoritative for the player's fights and reports outcomes to the
-   sim; `drift-combat`'s AI/weapon logic ports to 3-D for NPC behavior.
+   sim; `drift-combat`'s AI/weapon logic ports to 3-D for NPC behavior. The
+   **Elite-style targeting layer** lands here: the defining gunnery/scanner math
+   lives in a tested, engine-agnostic `targeting` module — a projectile
+   lead/intercept solver and a radar-contact projection — so it is unit-tested and
+   merely *driven* by the Bevy app (target lock, a lead pip, a contact scanner,
+   set-and-hold throttle, and NPCs that lead their shots). This keeps to the
+   crate's rule that the tested models carry the logic and the renderer is a thin
+   driver: the hard part (where a shot must go to hit a moving target) is verified
+   headlessly, and only pixels need a display.
 4. **M4 — real-time multiplayer flight** *(much later, separate)*. Prediction/rollback
    netcode over the server-authoritative model.
 

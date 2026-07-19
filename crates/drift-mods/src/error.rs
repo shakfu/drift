@@ -59,4 +59,10 @@ pub enum LoadError {
 
     #[error("system '{system}' uses unknown pricing strategy '{strategy}'")]
     UnknownPricing { system: String, strategy: String },
+
+    #[error(
+        "script '{name}' in mod '{mod_id}' shadows a built-in strategy of the same \
+         name; rename the script"
+    )]
+    ScriptShadowsBuiltin { mod_id: String, name: String },
 }

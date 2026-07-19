@@ -16,6 +16,8 @@ A galaxy of star systems, each a specialized marketplace, is loaded entirely fro
 
 - **Production chains** — `ore -> alloys -> machinery -> luxuries`, plus raw farming/mining and population consumption. Specialization creates the trade.
 
+- **Endogenous manufacturing capacity** — factories are not fixed-rate. Each manufacturing stage carries a slow **capital stock** that invests when its processing margin (output value minus input cost) is fat and disinvests when it is thin, scaling throughput on top of the instantaneous price elasticity. Because capital is sticky, supply gains a lagged, path-dependent response — capital concentrates where value is added, bidding up intermediate goods until margins compress into a new interior equilibrium. Raw extraction and population demand stay fixed; only the transformer chain invests.
+
 - **NPC trader economy** — greedy buy-low/sell-high agents whose flows self-correct shortages and gluts; idle traders deadhead toward opportunity rather than stranding at starved systems.
 
 - **Risk-aware routing** — traders value a run by its risk-adjusted expected value, discounting profit by the destination's danger (`risk_aversion`). Cautious traders shun valuable cargo runs into lawless space: they lose far fewer ships (and end up richer), at the cost of underserving the frontier.
@@ -30,7 +32,9 @@ A galaxy of star systems, each a specialized marketplace, is loaded entirely fro
 
 ### Play & flight
 
-- **3-D flight & combat (Bevy)** — fly your own ship in-system with an arcade chase-camera feel, dock at the station to trade (buy/sell over the live market), jump between systems, and **dogfight pirates in real time**. Combat has weapon variety (a fast Pulse, a heavy Cannon, a three-bolt Scatter, cycled with `Tab`), shield-then-hull damage, and explosions. Kills and losses **report back to the sim** — a destroyed pirate is removed from the galaxy and pays its bounty; your death destroys the trader (cargo lost) and pays out insurance. You are a real trader spawned through the same command pipeline as everything else.
+- **3-D flight (Bevy), Oolite-style** — fly your own ship in-system with **Oolite controls** (roll/pitch on the arrows, yaw on `,`/`.`, a set-and-hold throttle with a zero detent, a `J` torus-drive fast-cruise that mass-locks near enemies), dock at a slowly-rotating **Coriolis station** to trade over the live market, and **hyperspace-jump between systems on a fuel budget** — jumps cost fuel by distance and are refused when the tank is short; docking refuels. A full **instrument HUD** frames the cockpit: a contact scanner, hull/shield/speed/throttle/fuel/laser-temperature gauges, roll and pitch indicators, a compass to the station, a locked-target data panel, and a centre gunsight. Ship hulls are **data-driven** (`ShipDef.visual`): the Oolite-ish roster — a Cobra Mk III for you, Vipers for the navy, pirate raiders, Python freighters — renders as faceted metallic hulls with engine glow, and a mod can add a ship's look with no client change.
+
+- **Real-time combat, Elite-style** — lock a target (`T`) and the HUD paints a reticle and a **lead pip** marking exactly where to aim a fixed weapon at a moving ship; cycle four weapons (a **gimballed** Pulse that auto-tracks within a cone, a heavy fixed Cannon, a Scatter, and a continuous **beam laser**), each with a **laser temperature** that overheats and cuts out under sustained fire. Fire **homing missiles** (`M`) and defeat incoming ones with **ECM** (`E`). The **navy fights alongside** you against pirates — but shoot the police and your **bounty** climbs Clean → Offender → Fugitive, at which point they turn and hunt you. Destroyed pirates spill drifting **cargo canisters** you scoop up and sell. Kills and losses **report back to the sim** — a downed pirate is removed from the galaxy and pays its bounty; your death destroys the trader (cargo lost) and pays insurance — through the same validated command pipeline as everything else, so the determinism firewall holds.
 
 - **Interactive trader (CLI)** — play the living galaxy as text: buy low, run cargo through pirate space, fight or flee, sell high, take out loans and contracts.
 
@@ -44,9 +48,9 @@ A galaxy of star systems, each a specialized marketplace, is loaded entirely fro
 
 - **Data-driven mods** — all content (commodities, recipes, systems, ships) is authored as RON and loaded through a mod-loader with dependency ordering, explicit override rules, and fail-fast link-time validation.
 
-- **Mod scripting (Rhai)** — a sandboxed, fuel-limited scripting runtime (chosen over Lua/WASM for being pure-Rust and sandboxed by construction). A Rhai-authored pricing strategy plugs into the same name seam as the built-ins: a system can name a scripted strategy exactly like `supply_demand_v1`.
+- **Mod scripting (Rhai)** — a sandboxed, fuel-limited scripting runtime (chosen over Lua/WASM for being pure-Rust and sandboxed by construction). A Rhai-authored pricing strategy plugs into the same name seam as the built-ins: a system can name a scripted strategy exactly like `supply_demand_v1`. Scripts are declared in a mod's manifest (`[[scripts]]` with a `name`, a `.rhai` `path`, and a `kind`) and loaded from disk, so a mod adds behavior without any code change; the loader validates the script names against what content references, fail-fast like the rest of the content pipeline.
 
-- **Server-authoritative multiplayer** — a networked server (`drift-server`: TCP + length-prefixed JSON over the command pipeline) and a networked client that mirrors an authoritative `WorldView` and renders server broadcasts. The player client drives a single command sink whether it is a local session or a server.
+- **Server-authoritative multiplayer** — a networked server (`drift-server`: TCP + length-prefixed JSON over the command pipeline) and a networked client that mirrors an authoritative `WorldView` and renders server broadcasts. On connect the client presents a **content fingerprint** and the server refuses a mod mismatch, so a divergent client fails loudly instead of silently desyncing. The player client drives a single command sink whether it is a local session or a server.
 
 ## Workspace
 
@@ -80,9 +84,10 @@ make test                 # full workspace test suite (must stay green)
 make validate             # load + link the bundled mods, report errors
 make run                  # run the equilibrium scenario (override: make run TICKS=5000 SEED=7)
 
-# Fly and fight in 3-D (Bevy; behind the `gui` feature). Fly to the station ring and
-# Space to dock/trade, 1-9 to jump, F to fire, Tab to switch weapon. Use the lawless
-# frontier scenario for immediate pirate contact:
+# Fly and fight in 3-D (Bevy; behind the `gui` feature). Oolite-style controls:
+# arrows roll/pitch, ,/. yaw, W/S throttle, J torus-drive, A fire, Tab cycle weapon,
+# T target-lock, M missile, E ECM, Space dock, 1-9 jump. Use the lawless frontier
+# scenario for immediate pirate contact:
 cargo run -p drift-flight --features gui -- scenarios/frontier.ron
 
 # Play the living galaxy as a trader (interactive text): buy low, run cargo through
@@ -122,4 +127,4 @@ Mods live under `mods/<id>/` with a `manifest.toml` and RON content in `commodit
 
 ## Roadmap (not yet built)
 
-The next horizon is **M4: real-time multiplayer flight** — client prediction/rollback so several piloted ships share one authoritative server, which the current in-process flight layer does not yet do. Other planned work: loading `.rhai` scripts declared in mod manifests (currently registered programmatically) and more scripting hooks; allied escorts/navy fighting alongside you in the flight layer and data-driven ship visuals; a content-version handshake between client and server; and a larger galaxy with a deeper economy. See `TODO.md` and `docs/dev/` for the full picture.
+The next horizon is **M4: real-time multiplayer flight** — client prediction/rollback so several piloted ships share one authoritative server, which the current in-process flight layer does not yet do. Other planned work: more scripting hooks (trader AI, event rules) on the same `.rhai` seam; a larger galaxy and further economy depth (trade frictions/tariffs, consumer income) on top of the endogenous-capacity model; and more Oolite systems in the flight layer (station equipment and repair, witchspace misjumps, shootable traders, richer hull meshes). See `TODO.md` and `docs/dev/` for the full picture.

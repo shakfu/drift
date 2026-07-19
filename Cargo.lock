@@ -2520,6 +2520,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "drift-core",
+ "drift-data",
  "drift-economy",
  "drift-mods",
  "drift-sim",
@@ -2587,6 +2588,7 @@ dependencies = [
  "drift-mods",
  "ron",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 

@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use drift_data::ScenarioDef;
 use drift_economy::{
-    builtin_pricing, Command, SimEvent, Snapshot, World, WorldError,
+    builtin_pricing, pricing_for, Command, PricingScriptError, SimEvent, Snapshot, World,
+    WorldError,
 };
 use drift_mods::{load_and_link, LoadError, Registry};
 use thiserror::Error;
@@ -35,6 +36,8 @@ pub enum SessionError {
     },
     #[error(transparent)]
     Load(#[from] LoadError),
+    #[error(transparent)]
+    Script(#[from] PricingScriptError),
     #[error(transparent)]
     World(#[from] WorldError),
 }
@@ -75,7 +78,11 @@ impl Session {
         scenario: &ScenarioDef,
         seed: u64,
     ) -> Result<Self, SessionError> {
-        let world = World::new(registry, scenario, seed, &builtin_pricing())?;
+        // Compile the registry's mod-declared pricing scripts into the strategy
+        // set (built-ins plus scripts), so a system that names a scripted strategy
+        // resolves it at world-build time.
+        let pricing = pricing_for(&registry)?;
+        let world = World::new(registry, scenario, seed, &pricing)?;
         Ok(Self { world })
     }
 
@@ -142,7 +149,11 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use drift_data::TraderSpawn;
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -180,6 +191,130 @@ mod tests {
             .collect();
         assert!(!streamed.is_empty(), "the frontier run should emit events");
         assert_eq!(streamed, full, "step() reconstructs the full event log in order");
+    }
+
+    /// A quiet sandbox scenario: no NPC traders, no piracy, so nothing perturbs
+    /// the market prices set at world build.
+    fn quiet_sandbox() -> ScenarioDef {
+        ScenarioDef {
+            name: "script-sandbox".into(),
+            seed: 1,
+            ticks: 0,
+            traders: TraderSpawn {
+                count: 0,
+                ship: "test:hauler".into(),
+                starting_capital: 1000,
+            },
+            piracy: None,
+            risk_aversion: 0.0,
+            escort: None,
+            navy: None,
+            contract: None,
+            loan: None,
+            insurance: None,
+            future: None,
+        }
+    }
+
+    /// Write a mod whose single system is priced by a Rhai script returning `3 *
+    /// base`. The built-in strategy would price the good at `base` when stock is at
+    /// equilibrium, so `3 * base` unambiguously proves the *script* ran.
+    fn write_scripted_mod(root: &Path) {
+        let dir = root.join("core");
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        fs::create_dir_all(dir.join("commodities")).unwrap();
+        fs::create_dir_all(dir.join("systems")).unwrap();
+        fs::create_dir_all(dir.join("ships")).unwrap();
+        fs::write(
+            dir.join("manifest.toml"),
+            r#"id = "test"
+name = "Test"
+version = "0.1.0"
+
+[[scripts]]
+name = "test:triple"
+path = "scripts/triple.rhai"
+kind = "pricing"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("scripts/triple.rhai"),
+            "fn price(base, stock, equilibrium, elasticity) { base * 3 }",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("commodities/goods.ron"),
+            r#"[ (id: "test:food", name: "Food", base_price: 100, unit_mass: 1, elasticity: 0.8, category: "food") ]"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("systems/lave.ron"),
+            r#"[
+                (id: "test:lave", name: "Lave", position: (0.0, 0.0),
+                 industries: [], connections: [],
+                 initial_stock: [(commodity: "test:food", qty: 100)],
+                 pricing: "test:triple"),
+            ]"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("ships/hauler.ron"),
+            r#"[ (id: "test:hauler", name: "Hauler", cargo_capacity: 20, jump_speed: 5.0, hull: 80, max_speed: 200.0) ]"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_mod_declared_pricing_script_drives_a_market() {
+        // End-to-end: a `.rhai` file on disk, declared in a manifest, selected by a
+        // system's `pricing`, compiled into the strategy set, and actually pricing
+        // the market — all through `Session`, with no programmatic registration.
+        let tmp = TempDir::new().unwrap();
+        write_scripted_mod(tmp.path());
+
+        let reg = load_registry(tmp.path()).expect("scripted mod should load and link");
+        assert_eq!(reg.scripts().len(), 1, "the declared script was loaded");
+
+        let session = Session::new(reg, &quiet_sandbox(), 1).expect("world should build");
+        let food = session.registry().commodity_id("test:food").unwrap();
+        let sys = session.registry().system_id("test:lave").unwrap();
+        let market = session
+            .world()
+            .markets()
+            .iter()
+            .find(|m| m.system == sys)
+            .unwrap();
+        assert_eq!(
+            market.price(food),
+            Some(300),
+            "the market is priced by the script (3 * base), not the built-in"
+        );
+    }
+
+    #[test]
+    fn a_broken_pricing_script_fails_the_session_build() {
+        // A script that does not compile must abort `Session::new` with a clear
+        // error, not surface as a silent price-floor at the first repricing tick.
+        let tmp = TempDir::new().unwrap();
+        write_scripted_mod(tmp.path());
+        // Clobber the script with a syntax error.
+        fs::write(
+            tmp.path().join("core/scripts/triple.rhai"),
+            "fn price(base, stock, equilibrium, elasticity) { base * }",
+        )
+        .unwrap();
+
+        let reg = load_registry(tmp.path()).expect("content still links (source is not compiled here)");
+        // `Session` is not `Debug`, so match rather than `unwrap_err`.
+        let err = match Session::new(reg, &quiet_sandbox(), 1) {
+            Ok(_) => panic!("a broken pricing script must fail the session build"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, SessionError::Script(_)),
+            "a compile failure should be a Script error, got {err:?}"
+        );
     }
 
     #[test]

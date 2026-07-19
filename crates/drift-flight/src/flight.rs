@@ -97,12 +97,110 @@ impl Ship {
     }
 }
 
+/// A held throttle setpoint in `[-1, 1]` with a **zero detent**.
+///
+/// Set-and-hold throttle (Elite-style) rather than momentary thrust: the client
+/// slews it up/down and the flight model thrusts to hold it. The detent makes zero
+/// sticky — slewing into `0` parks there and holds while the key is still down, so
+/// the pilot settles on a dead stop without sliding through into reverse; crossing
+/// into the opposite sign takes a deliberate release-and-press. Kept here (engine-
+/// agnostic) so the detent behaviour is unit-tested; the app wraps it as a Bevy
+/// resource.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Throttle {
+    /// Current setpoint, `-1` (full reverse) to `+1` (full ahead).
+    pub level: f32,
+    /// Latched once the throttle has parked at the zero detent. Cleared when the
+    /// throttle keys are released (`step` with `input == 0`), which re-arms
+    /// crossing zero on the next press.
+    pub at_zero_detent: bool,
+}
+
+impl Throttle {
+    /// Advance the throttle one frame. `input` is the raw axis (`+1` raise, `-1`
+    /// lower, `0` released), `rate` the slew per second, `dt` the timestep.
+    pub fn step(&mut self, input: i32, rate: f32, dt: f32) {
+        if input == 0 {
+            // Released: re-arm so the next press may cross zero.
+            self.at_zero_detent = false;
+            return;
+        }
+        let next = self.level + input as f32 * rate * dt;
+        if (self.level > 0.0 && next <= 0.0) || (self.level < 0.0 && next >= 0.0) {
+            // Slewed into the zero detent: stop exactly at zero and latch.
+            self.level = 0.0;
+            self.at_zero_detent = true;
+        } else if self.at_zero_detent && self.level == 0.0 {
+            // Parked at the detent with the key still held: hold zero until release.
+            self.level = 0.0;
+        } else {
+            self.level = next.clamp(-1.0, 1.0);
+        }
+    }
+
+    /// Cut to a parked dead stop (the client's `X` key).
+    pub fn stop(&mut self) {
+        self.level = 0.0;
+        self.at_zero_detent = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn approx(a: Vec3, b: Vec3) -> bool {
         (a - b).length() < 1e-3
+    }
+
+    #[test]
+    fn throttle_parks_at_zero_without_overshooting_into_reverse() {
+        // Held reverse from a positive setting must settle on a dead stop, not slide
+        // through into negative — the whole point of the detent.
+        let mut t = Throttle { level: 0.6, at_zero_detent: false };
+        for _ in 0..1000 {
+            t.step(-1, 1.2, 0.1);
+            assert!(t.level >= 0.0, "held reverse never overshoots past zero: {}", t.level);
+        }
+        assert_eq!(t.level, 0.0, "settled exactly on the stop");
+        assert!(t.at_zero_detent, "and latched the detent");
+    }
+
+    #[test]
+    fn crossing_zero_needs_a_fresh_press() {
+        // Parked at the detent, still holding down: stays at zero.
+        let mut t = Throttle { level: 0.0, at_zero_detent: true };
+        t.step(-1, 1.2, 0.1);
+        assert_eq!(t.level, 0.0, "held key stays parked at the detent");
+        // Release re-arms, then a fresh press crosses into reverse.
+        t.step(0, 1.2, 0.1);
+        assert!(!t.at_zero_detent, "release clears the latch");
+        t.step(-1, 1.2, 0.1);
+        assert!(t.level < 0.0, "a fresh press crosses into reverse");
+    }
+
+    #[test]
+    fn detent_is_symmetric_from_reverse() {
+        // Raising out of reverse also stops at zero rather than shooting to forward.
+        let mut t = Throttle { level: -0.5, at_zero_detent: false };
+        for _ in 0..1000 {
+            t.step(1, 1.2, 0.1);
+            assert!(t.level <= 0.0, "held forward from reverse never overshoots: {}", t.level);
+        }
+        assert_eq!(t.level, 0.0);
+        assert!(t.at_zero_detent);
+    }
+
+    #[test]
+    fn throttle_is_clamped_and_stop_parks() {
+        let mut t = Throttle::default();
+        for _ in 0..1000 {
+            t.step(1, 1.2, 0.1);
+        }
+        assert!(t.level <= 1.0 + 1e-6 && t.level >= 0.99, "reaches and holds full ahead");
+        t.stop();
+        assert_eq!(t.level, 0.0);
+        assert!(t.at_zero_detent, "stop parks at the detent");
     }
 
     #[test]

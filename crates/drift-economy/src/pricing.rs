@@ -9,8 +9,10 @@
 //! schema change and no change to any market or caller.
 
 use drift_core::{Money, NamedRegistry, Quantity};
-use drift_script::ScriptedPricing;
+use drift_mods::{Registry, ScriptKind};
+use drift_script::{CompileError, ScriptedPricing};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Lower/upper bounds on price as a multiple of base, so scarcity/glut cannot
 /// drive prices to absurd extremes (or to zero, which would break trading).
@@ -138,6 +140,47 @@ pub fn builtin_pricing() -> PricingSet {
     set.registry
         .register("supply_demand_v1", PricingStrategy::SupplyDemandV1);
     set
+}
+
+/// A mod-declared pricing script failed to compile at world-build time.
+#[derive(Debug, Error)]
+#[error("pricing script '{name}' (mod '{mod_id}') failed to compile: {source}")]
+pub struct PricingScriptError {
+    pub name: String,
+    pub mod_id: String,
+    #[source]
+    pub source: CompileError,
+}
+
+/// The pricing set for a run built from a linked [`Registry`]: the built-ins plus
+/// every mod-declared pricing script, compiled from its source and registered
+/// under the name content selects it by.
+///
+/// This is the bridge from data-on-disk to the executable seam: the loader has
+/// already validated that each system's `pricing` name resolves (built-in or a
+/// declared script), and here those declared scripts become live strategies. The
+/// registration order matches [`Registry::scripts`], so the resulting
+/// [`PricingStrategy::Scripted`] indices are stable. Fails if any script does not
+/// compile, so a broken mod aborts the load rather than surfacing at the first
+/// repricing tick.
+pub fn pricing_for(registry: &Registry) -> Result<PricingSet, PricingScriptError> {
+    let mut set = builtin_pricing();
+    for script in registry.scripts() {
+        match script.kind {
+            ScriptKind::Pricing => {
+                let compiled =
+                    ScriptedPricing::compile(&script.source).map_err(|source| {
+                        PricingScriptError {
+                            name: script.name.clone(),
+                            mod_id: script.mod_id.clone(),
+                            source,
+                        }
+                    })?;
+                set.register_script(&script.name, compiled);
+            }
+        }
+    }
+    Ok(set)
 }
 
 #[cfg(test)]

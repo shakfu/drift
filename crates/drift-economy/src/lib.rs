@@ -22,6 +22,6 @@ pub use event::{EventCategory, SimEvent};
 pub use finance::{Future, FutureSide, Loan, LoanId, Policy};
 pub use market::{Market, MarketGood};
 pub use patrol::{Patrol, PatrolId, PatrolLocation};
-pub use pricing::{builtin_pricing, PricingSet, PricingStrategy};
+pub use pricing::{builtin_pricing, pricing_for, PricingScriptError, PricingSet, PricingStrategy};
 pub use trader::{choose_trade, Trader, TraderId, TraderLocation, TradePlan};
 pub use world::{EncounterView, PiracyStats, Snapshot, World, WorldError};

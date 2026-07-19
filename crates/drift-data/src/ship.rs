@@ -28,6 +28,37 @@ pub struct CombatStats {
     pub acceleration: f64,
 }
 
+/// The silhouette family a ship's hull is built from. A renderer maps this plus
+/// the [`ShipVisual`] dimensions to a mesh; it carries no engine types, so the
+/// data stays engine-agnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HullShape {
+    /// A sleek, pointed dart — fighters and light craft.
+    Dart,
+    /// A bulky hull with a hexagonal cross-section — traders and freighters.
+    Freighter,
+}
+
+/// How a ship looks: the data-driven hull description a 3-D client renders. Kept
+/// as plain dimensions and an RGB tint (not engine types) so a mod can introduce
+/// a new ship's appearance without any client code change. Optional on
+/// [`ShipDef`]; a ship without one falls back to a generic hull.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipVisual {
+    /// Hull silhouette family.
+    pub hull: HullShape,
+    /// Overall nose-to-tail length in world units.
+    pub length: f32,
+    /// Half-width (wingspan / beam) in world units.
+    pub width: f32,
+    /// Dorsal height in world units.
+    pub height: f32,
+    /// Hull tint as linear RGB in `[0, 1]`.
+    pub color: [f32; 3],
+}
+
 /// A ship variant. NPC traders and (later) the player fly these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +79,9 @@ pub struct ShipDef {
     /// Combat loadout. `None` = unarmed civilian.
     #[serde(default)]
     pub combat: Option<CombatStats>,
+    /// How the ship looks to a 3-D client. `None` = fall back to a generic hull.
+    #[serde(default)]
+    pub visual: Option<ShipVisual>,
 }
 
 #[cfg(test)]
@@ -72,6 +106,7 @@ mod tests {
                 accuracy: 0.9,
                 acceleration: 30.0,
             }),
+            visual: None,
         };
         let text = ron::to_string(&def).unwrap();
         let back: ShipDef = ron::from_str(&text).unwrap();
@@ -83,5 +118,20 @@ mod tests {
         let text = r#"(id: "x", name: "X", cargo_capacity: 1, jump_speed: 1.0, hull: 1, max_speed: 1.0)"#;
         let s: ShipDef = ron::from_str(text).unwrap();
         assert_eq!(s.combat, None);
+        assert_eq!(s.visual, None, "visual is optional and defaults to none");
+    }
+
+    #[test]
+    fn visual_parses_from_ron() {
+        let text = r#"(id: "x", name: "X", cargo_capacity: 1, jump_speed: 1.0, hull: 1, max_speed: 1.0,
+            visual: Some((hull: dart, length: 4.0, width: 1.8, height: 0.5, color: (0.7, 0.8, 0.9))))"#;
+        let s: ShipDef = ron::from_str(text).unwrap();
+        let v = s.visual.expect("visual present");
+        assert_eq!(v.hull, HullShape::Dart);
+        assert_eq!(v.length, 4.0);
+        assert_eq!(v.color, [0.7, 0.8, 0.9]);
+        // Round-trips.
+        let back: ShipDef = ron::from_str(&ron::to_string(&s).unwrap()).unwrap();
+        assert_eq!(s, back);
     }
 }

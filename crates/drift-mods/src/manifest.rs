@@ -24,6 +24,40 @@ pub struct Manifest {
     /// override a deliberate, auditable act.
     #[serde(default)]
     pub overrides: Vec<String>,
+    /// Behavior scripts this mod contributes, each declared as a `[[scripts]]`
+    /// table. A script registers a named strategy at load time — content then
+    /// selects it by name exactly like a built-in (e.g. a system's
+    /// `pricing: "<name>"`). The loader reads the `.rhai` file from disk and
+    /// fails the load if it is missing.
+    #[serde(default)]
+    pub scripts: Vec<ScriptEntry>,
+}
+
+/// Which engine seam a mod script plugs into. The name a script registers is
+/// resolved through this seam, so the kind determines the calling convention the
+/// script must implement. Only pricing exists today; trader-AI and event-rule
+/// kinds are the planned extensions, and an unknown kind fails the load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptKind {
+    /// A market pricing strategy. The script must define
+    /// `fn price(base, stock, equilibrium, elasticity)` returning the unit price.
+    #[default]
+    Pricing,
+}
+
+/// One `[[scripts]]` entry in a manifest: a named script backed by a `.rhai` file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptEntry {
+    /// The strategy name content references (e.g. `pricing: "volatile_v1"`). Must
+    /// be unique across all loaded mods and must not shadow a built-in strategy.
+    pub name: String,
+    /// Path to the `.rhai` source, relative to this mod's directory.
+    pub path: String,
+    /// Which seam this script plugs into. Defaults to [`ScriptKind::Pricing`].
+    #[serde(default)]
+    pub kind: ScriptKind,
 }
 
 impl Manifest {

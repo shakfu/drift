@@ -33,8 +33,12 @@ Ordered by dependency and value from the current headless simulation:
    Rust, sandboxed by construction, operation-limited), in the new `drift-script`
    crate, with a `ScriptedPricing` hook proven deterministic/sandboxed/fuel-limited
    by tests. `wasmi` is the hardening swap-in behind the same seam if
-   lockstep-across-clients determinism is ever required. Next: wire scripted
-   strategies through the `NamedRegistry` seam and load `.rhai` from mod manifests.
+   lockstep-across-clients determinism is ever required. Scripted strategies are
+   now wired through the `NamedRegistry` seam and **load from mod manifests**: a
+   `[[scripts]]` table names a strategy backed by a `.rhai` file, the loader reads
+   and validates it, and `pricing_for` compiles it into the run's strategy set — a
+   system selects a disk-authored strategy by name with no programmatic
+   registration. Next: more hooks on the same seam (trader AI, event rules).
 6. **Multi-tick running battles** — DONE. Encounters now play out over several
    economy ticks: `drift-combat`'s `Encounter` is serializable and steppable, and
    the world advances `ActiveEncounter`s (each with its own RNG, participants keyed

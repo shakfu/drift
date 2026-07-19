@@ -86,12 +86,17 @@ impl Server {
     pub fn run(mut self, listener: TcpListener, shutdown: Arc<AtomicBool>) -> std::io::Result<()> {
         let (tx, rx) = mpsc::channel::<Input>();
 
+        // Fingerprint of the content this server runs. Every client must present a
+        // matching hash in its handshake, or it is refused (see `client_loop`).
+        let content_hash = self.session.registry().content_hash();
+
         // Accept thread: non-blocking accept + short sleep so it can observe
         // `shutdown` rather than parking forever inside `accept()`.
         listener.set_nonblocking(true)?;
         let accept_shutdown = shutdown.clone();
         let accept_tx = tx.clone();
-        let accept = thread::spawn(move || accept_loop(listener, accept_tx, accept_shutdown));
+        let accept =
+            thread::spawn(move || accept_loop(listener, accept_tx, accept_shutdown, content_hash));
 
         let period = Duration::from_secs_f64(1.0 / self.config.tick_hz.max(0.001));
         let snapshot_every = self.config.snapshot_every.max(1);
@@ -152,10 +157,15 @@ impl Server {
     }
 }
 
-/// Accept connections until `shutdown`. Each connection gets an id, a reader
-/// thread for its inbound half, and a `Connect` handing its outbound half to the
-/// sim thread.
-fn accept_loop(listener: TcpListener, tx: Sender<Input>, shutdown: Arc<AtomicBool>) {
+/// Accept connections until `shutdown`. Each connection gets an id and a
+/// dedicated thread ([`client_loop`]) that first performs the content handshake
+/// and only then admits the client to the sim thread.
+fn accept_loop(
+    listener: TcpListener,
+    tx: Sender<Input>,
+    shutdown: Arc<AtomicBool>,
+    content_hash: u64,
+) {
     let mut next_id: u64 = 0;
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -165,23 +175,13 @@ fn accept_loop(listener: TcpListener, tx: Sender<Input>, shutdown: Arc<AtomicBoo
             Ok((stream, _addr)) => {
                 let id = next_id;
                 next_id += 1;
-                // Two handles to the same socket: the sim thread writes, the
-                // reader thread reads. `try_clone` failing means we skip this
-                // client rather than corrupt the loop.
                 // An accepted socket can inherit the listener's non-blocking mode
                 // on some platforms; force blocking so `write_all`/`read_exact`
                 // park instead of erroring with `WouldBlock`.
                 stream.set_nonblocking(false).ok();
                 stream.set_nodelay(true).ok();
-                let read_half = match stream.try_clone() {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                if tx.send(Input::Connect(id, stream)).is_err() {
-                    break; // sim thread gone
-                }
-                let rtx = tx.clone();
-                thread::spawn(move || reader_loop(id, read_half, rtx));
+                let ctx = tx.clone();
+                thread::spawn(move || client_loop(id, stream, ctx, content_hash));
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(20));
@@ -194,13 +194,56 @@ fn accept_loop(listener: TcpListener, tx: Sender<Input>, shutdown: Arc<AtomicBoo
     }
 }
 
-/// Decode inbound messages from one client until the stream closes or a protocol
-/// error occurs, forwarding commands to the sim thread. Blocks on `read_msg`; it
-/// unblocks when the client disconnects (read returns an error), at which point
-/// it reports the disconnect and ends. A blocked reader outlives `shutdown`, but
-/// that only holds a socket, and the process exit reclaims it.
-fn reader_loop(id: u64, mut stream: TcpStream, tx: Sender<Input>) {
-    // Loops until the stream closes (read errors) or the sim thread is gone.
+/// Serve one client: handshake, then pump its commands until it disconnects.
+///
+/// The client's **first** message must be a [`ClientMessage::Hello`] carrying the
+/// content hash of the mods it loaded. If it matches this server's `content_hash`
+/// the client is admitted — its write half is handed to the sim thread via
+/// [`Input::Connect`] (which triggers the welcome snapshot) and this thread
+/// becomes the client's command reader. On a mismatch (or a first message that is
+/// not a `Hello`), the client is refused with a [`ServerMessage::Reject`] and the
+/// connection is dropped without ever entering the sim, so a mismatched client
+/// can never desync the world.
+///
+/// The handshake runs on this per-client thread rather than the accept thread, so
+/// a slow or silent client cannot stall new connections.
+fn client_loop(id: u64, mut stream: TcpStream, tx: Sender<Input>, content_hash: u64) {
+    // 1. Handshake. Read exactly one message and require it to be a matching Hello.
+    match read_msg::<_, ClientMessage>(&mut stream) {
+        Ok(ClientMessage::Hello { content_hash: client_hash }) if client_hash == content_hash => {
+            // Accepted; fall through to admit the client.
+        }
+        Ok(ClientMessage::Hello { content_hash: client_hash }) => {
+            let reason = format!(
+                "content mismatch: client {client_hash:016x} does not match server {content_hash:016x}; \
+                 load the same mods as the server"
+            );
+            let _ = write_msg(&mut stream, &ServerMessage::Reject { reason });
+            return;
+        }
+        Ok(ClientMessage::Command(_)) => {
+            let reason = "protocol error: expected a Hello handshake as the first message".to_string();
+            let _ = write_msg(&mut stream, &ServerMessage::Reject { reason });
+            return;
+        }
+        // Client vanished (or sent garbage) before completing the handshake.
+        Err(_) => return,
+    }
+
+    // 2. Admit: hand the sim thread a write half so it can broadcast to this
+    //    client. `try_clone` failing means we drop this client rather than admit a
+    //    half-open one.
+    let write_half = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if tx.send(Input::Connect(id, write_half)).is_err() {
+        return; // sim thread gone
+    }
+
+    // 3. Pump commands until the stream closes (read errors) or the sim thread is
+    //    gone. A blocked reader outlives `shutdown`, but that only holds a socket,
+    //    and the process exit reclaims it.
     while let Ok(ClientMessage::Command(cmd)) = read_msg::<_, ClientMessage>(&mut stream) {
         if tx.send(Input::Command(cmd)).is_err() {
             break; // sim thread gone

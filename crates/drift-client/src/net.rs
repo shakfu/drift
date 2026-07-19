@@ -42,15 +42,40 @@ pub struct NetClient {
 
 impl NetClient {
     /// Connect to `addr` (e.g. `127.0.0.1:4000`) and start receiving broadcasts.
-    pub fn connect(addr: &str) -> io::Result<Self> {
-        let stream = TcpStream::connect(addr)?;
+    ///
+    /// `content_hash` is the fingerprint of the mods this client loaded (from
+    /// `drift_mods::Registry::content_hash`). It is sent as the opening handshake;
+    /// the server refuses the connection if it does not match its own content, so
+    /// this returns an error (rather than silently rendering a desynced world)
+    /// when the client and server run different mods.
+    pub fn connect(addr: &str, content_hash: u64) -> io::Result<Self> {
+        let mut stream = TcpStream::connect(addr)?;
         stream.set_nodelay(true).ok();
-        let reader = stream.try_clone()?;
+
+        // Handshake: announce our content hash before anything else.
+        write_msg(&mut stream, &ClientMessage::Hello { content_hash })?;
+
+        // The server's first reply is either a Reject (mismatch) or the welcome
+        // State. Read it synchronously so a rejection surfaces as a connect error.
+        let mut reader = stream.try_clone()?;
         let shared = Arc::new(Mutex::new(Shared {
             latest: None,
             events: VecDeque::new(),
             connected: true,
         }));
+        match read_msg::<_, ServerMessage>(&mut reader)? {
+            ServerMessage::Reject { reason } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("server refused connection: {reason}"),
+                ));
+            }
+            ServerMessage::State { events, snapshot, .. } => {
+                let view = snapshot.and_then(|v| WorldView::from_snapshot_value(v).ok());
+                apply_state(&shared, events, view);
+            }
+        }
+
         let reader_shared = shared.clone();
         thread::spawn(move || reader_loop(reader, reader_shared));
         Ok(Self {
@@ -87,24 +112,31 @@ impl NetClient {
     }
 }
 
+/// Fold one broadcast's events and (optional, already-decoded) world view into
+/// the shared state.
+fn apply_state(shared: &Mutex<Shared>, events: Vec<SimEvent>, view: Option<WorldView>) {
+    let mut s = shared.lock().unwrap();
+    for e in events {
+        s.events.push_back(e);
+    }
+    while s.events.len() > EVENT_LOG_CAP {
+        s.events.pop_front();
+    }
+    if let Some(view) = view {
+        s.latest = Some(view);
+    }
+}
+
 /// Decode server broadcasts until the connection closes, updating shared state.
 fn reader_loop(mut stream: TcpStream, shared: Arc<Mutex<Shared>>) {
     // Loops until the connection closes or a protocol error occurs (read errors).
+    // A `Reject` is only sent during the handshake (handled in `connect`), so any
+    // non-`State` message here simply ends the loop.
     while let Ok(ServerMessage::State { events, snapshot, .. }) =
         read_msg::<_, ServerMessage>(&mut stream)
     {
-        let mut s = shared.lock().unwrap();
-        for e in events {
-            s.events.push_back(e);
-        }
-        while s.events.len() > EVENT_LOG_CAP {
-            s.events.pop_front();
-        }
-        if let Some(value) = snapshot {
-            if let Ok(view) = WorldView::from_snapshot_value(value) {
-                s.latest = Some(view);
-            }
-        }
+        let view = snapshot.and_then(|v| WorldView::from_snapshot_value(v).ok());
+        apply_state(&shared, events, view);
     }
     shared.lock().unwrap().connected = false;
 }
@@ -164,7 +196,7 @@ mod tests {
         let ship = reg.ship_id("core:cobra_mk3").unwrap();
         let at = reg.system_id("core:lave").unwrap();
         let food = reg.commodity_id("core:food").unwrap();
-        let session = Session::new(reg, &sandbox(), 1).unwrap();
+        let session = Session::new(reg.clone(), &sandbox(), 1).unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -174,7 +206,7 @@ mod tests {
         let handle =
             thread::spawn(move || Server::new(session, config).run(listener, server_shutdown));
 
-        let net = NetClient::connect(&addr.to_string()).unwrap();
+        let net = NetClient::connect(&addr.to_string(), reg.content_hash()).unwrap();
 
         // The reader thread should receive the welcome snapshot (no traders yet).
         assert!(poll_until(|| net.latest_view().is_some()), "should receive a world view");
@@ -207,6 +239,43 @@ mod tests {
             }),
             "the bought cargo should show up on the player's trader"
         );
+
+        shutdown.store(true, Ordering::Relaxed);
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn content_mismatch_is_refused_at_connect() {
+        // The server runs the real bundled content; the client presents a bogus
+        // hash. The handshake must fail the connection rather than admit a client
+        // that would silently desync.
+        let reg = load_registry(&mods_path()).unwrap();
+        let session = Session::new(reg.clone(), &sandbox(), 1).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+        let config = ServerConfig { tick_hz: 200.0, snapshot_every: 1 };
+        let handle =
+            thread::spawn(move || Server::new(session, config).run(listener, server_shutdown));
+
+        let wrong_hash = reg.content_hash() ^ 0xdead_beef;
+        // `NetClient` is not `Debug`, so match rather than `expect_err`.
+        let err = match NetClient::connect(&addr.to_string(), wrong_hash) {
+            Ok(_) => panic!("a content mismatch must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("content mismatch"),
+            "the error should explain the mismatch, got: {err}"
+        );
+
+        // A matching client still connects to the same server, proving the server
+        // stays healthy after refusing one (the sim thread never saw the reject).
+        let good = NetClient::connect(&addr.to_string(), reg.content_hash())
+            .expect("a matching client should connect");
+        assert!(poll_until(|| good.latest_view().is_some()));
 
         shutdown.store(true, Ordering::Relaxed);
         handle.join().unwrap().unwrap();

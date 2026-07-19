@@ -1,25 +1,33 @@
 // Ships. cargo_capacity + jump_speed drive trading; hull, max_speed, and the
 // optional `combat` block drive the combat model. Omit `combat` for an unarmed
-// civilian.
+// civilian. The optional `visual` block describes the hull for the 3-D client
+// (silhouette family `dart`/`freighter` + dimensions + linear-RGB tint); omit it
+// to fall back to a generic hull.
 [
     (id: "core:cobra_mk3", name: "Cobra Mk III", cargo_capacity: 35,  jump_speed: 7.0, hull: 100, max_speed: 350.0,
-     combat: Some((shield: 50, shield_regen: 1.0, weapon_damage: 8, weapon_range: 40.0, weapon_cooldown: 2, accuracy: 0.9, acceleration: 30.0))),
+     combat: Some((shield: 50, shield_regen: 1.0, weapon_damage: 8, weapon_range: 40.0, weapon_cooldown: 2, accuracy: 0.9, acceleration: 30.0)),
+     visual: Some((hull: dart, length: 4.2, width: 1.9, height: 0.55, color: (0.70, 0.80, 0.95)))),
 
     (id: "core:python", name: "Python", cargo_capacity: 100, jump_speed: 4.0, hull: 250, max_speed: 200.0,
-     combat: Some((shield: 120, shield_regen: 1.5, weapon_damage: 14, weapon_range: 45.0, weapon_cooldown: 3, accuracy: 0.85, acceleration: 14.0))),
+     combat: Some((shield: 120, shield_regen: 1.5, weapon_damage: 14, weapon_range: 45.0, weapon_cooldown: 3, accuracy: 0.85, acceleration: 14.0)),
+     visual: Some((hull: freighter, length: 5.6, width: 1.4, height: 0.95, color: (0.45, 0.60, 0.90)))),
 
     // An unarmed hauler: no `combat` block.
-    (id: "core:shuttle", name: "Shuttle", cargo_capacity: 20, jump_speed: 6.0, hull: 60, max_speed: 300.0),
+    (id: "core:shuttle", name: "Shuttle", cargo_capacity: 20, jump_speed: 6.0, hull: 60, max_speed: 300.0,
+     visual: Some((hull: dart, length: 3.0, width: 1.2, height: 0.50, color: (0.72, 0.72, 0.75)))),
 
     // A light raider. Roughly a fair 1v1 for a Cobra, deadly in a pack.
     (id: "core:pirate", name: "Pirate Raider", cargo_capacity: 10, jump_speed: 6.0, hull: 60, max_speed: 340.0,
-     combat: Some((shield: 20, shield_regen: 0.5, weapon_damage: 7, weapon_range: 38.0, weapon_cooldown: 2, accuracy: 0.85, acceleration: 34.0))),
+     combat: Some((shield: 20, shield_regen: 0.5, weapon_damage: 7, weapon_range: 38.0, weapon_cooldown: 2, accuracy: 0.85, acceleration: 34.0)),
+     visual: Some((hull: dart, length: 3.4, width: 2.0, height: 0.34, color: (0.90, 0.32, 0.30)))),
 
     // A light escort that convoys hire for protection.
     (id: "core:escort", name: "Escort Fighter", cargo_capacity: 5, jump_speed: 7.0, hull: 80, max_speed: 360.0,
-     combat: Some((shield: 40, shield_regen: 1.0, weapon_damage: 9, weapon_range: 42.0, weapon_cooldown: 2, accuracy: 0.9, acceleration: 36.0))),
+     combat: Some((shield: 40, shield_regen: 1.0, weapon_damage: 9, weapon_range: 42.0, weapon_cooldown: 2, accuracy: 0.9, acceleration: 36.0)),
+     visual: Some((hull: dart, length: 3.8, width: 1.0, height: 0.45, color: (0.55, 0.85, 0.70)))),
 
     // A navy frigate: heavily armed law-enforcement patrol.
     (id: "core:navy", name: "Navy Frigate", cargo_capacity: 10, jump_speed: 5.0, hull: 200, max_speed: 260.0,
-     combat: Some((shield: 150, shield_regen: 2.0, weapon_damage: 16, weapon_range: 48.0, weapon_cooldown: 2, accuracy: 0.9, acceleration: 22.0))),
+     combat: Some((shield: 150, shield_regen: 2.0, weapon_damage: 16, weapon_range: 48.0, weapon_cooldown: 2, accuracy: 0.9, acceleration: 22.0)),
+     visual: Some((hull: freighter, length: 4.8, width: 1.2, height: 0.85, color: (0.40, 0.85, 0.85)))),
 ]

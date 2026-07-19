@@ -11,6 +11,17 @@
 //! dear and producers make more when their product is dear. That negative
 //! feedback lets the economy settle to a genuine equilibrium instead of pinning a
 //! chronically short good at its price clamp.
+//!
+//! Throughput is additionally scaled by an **endogenous capacity** — a slow
+//! capital stock per manufacturing industry (see [`capacity_target`] and
+//! [`eased_capacity`]). Where elasticity is a market's *immediate* response to the
+//! current price, capacity is the *accumulated* one: a factory grows its capital
+//! when its processing margin (output value minus input cost) is fat and lets it
+//! decay when the margin is thin. Because capital is sticky (it eases toward its
+//! target far slower than prices move), supply gains a lagged, path-dependent
+//! response — investment and disinvestment — on top of the instantaneous
+//! elasticity. Only transformers (recipes with both inputs and outputs) have
+//! capacity; raw extractors and pure consumers are fixed (see [`has_capacity`]).
 
 use drift_core::{CommodityId, Money};
 use drift_mods::ResolvedRecipe;
@@ -20,6 +31,78 @@ use crate::market::Market;
 /// Upper bound on the elastic scaling factor, so a wild price cannot make a
 /// recipe run absurdly fast.
 pub const MAX_ELASTIC_FACTOR: f64 = 4.0;
+
+/// Lower/upper bounds on an industry's endogenous **capacity** multiplier.
+///
+/// Capacity scales throughput *on top of* the instantaneous [`elastic_factor`]:
+/// where elasticity is a market's immediate response to the current price, a
+/// factory's capacity is its accumulated capital stock, which grows or decays
+/// slowly with sustained profitability. The bounds keep a boom from exploding to
+/// infinity and a bust from killing an industry outright (a floored industry can
+/// always recover if its margin returns).
+pub const MIN_CAPACITY: f64 = 0.25;
+pub const MAX_CAPACITY: f64 = 4.0;
+
+/// Investment elasticity: how strongly a profitability ratio pulls the capacity
+/// target. Deliberately mild (< 1), so capital chases returns without
+/// overreacting to a transient margin.
+pub const CAPACITY_INVEST_ELASTICITY: f64 = 0.5;
+
+/// Fraction of the gap to the capacity target closed each tick. Far slower than
+/// price smoothing (`PRICE_SMOOTHING == 0.2`): capital is sticky, so capacity
+/// lags the price signal by many ticks. That lag is the source of the richer
+/// investment dynamics (over- and under-shoot, hysteresis), and being slow keeps
+/// the capital/price loop damped rather than driving a cobweb blow-up.
+pub const CAPACITY_SMOOTHING: f64 = 0.02;
+
+/// Whether an industry has an endogenous capacity at all. Capacity models
+/// *processing* capital, so it applies only to transformers — recipes with both
+/// inputs and outputs (the manufacturing chain). Raw extractors (no inputs) are
+/// fixed natural endowments, and pure consumers (no outputs) are population
+/// demand; neither invests, so both hold nominal capacity `1.0`.
+pub fn has_capacity(recipe: &ResolvedRecipe) -> bool {
+    !recipe.inputs.is_empty() && !recipe.outputs.is_empty()
+}
+
+/// The value one application of `recipe` adds at the prices `price_of` returns:
+/// the outputs valued minus the inputs valued. This per-application margin is the
+/// profit signal capacity investment chases.
+pub fn recipe_margin(recipe: &ResolvedRecipe, price_of: impl Fn(CommodityId) -> Money) -> Money {
+    let value = |goods: &[(CommodityId, u32)]| -> Money {
+        goods
+            .iter()
+            .map(|(c, q)| price_of(*c) * *q as Money)
+            .sum()
+    };
+    value(&recipe.outputs) - value(&recipe.inputs)
+}
+
+/// The capacity an industry is drawn toward, from its current and baseline
+/// per-application margins (see [`recipe_margin`]).
+///
+/// The target is the profitability ratio `margin_now / margin_base` raised to the
+/// investment elasticity, clamped to `[MIN_CAPACITY, MAX_CAPACITY]`. The baseline
+/// margin (margins valued at base prices) is a per-recipe constant, so at base
+/// prices the ratio is `1` and the target is nominal capacity — the fixed point.
+/// A non-positive baseline margin (a break-even or loss-leading recipe) yields
+/// `1.0`, i.e. no investment signal, and a currently-unprofitable industry
+/// (non-positive `margin_now`) is pulled to the floor.
+pub fn capacity_target(margin_now: Money, margin_base: Money) -> f64 {
+    if margin_base <= 0 {
+        return 1.0;
+    }
+    let ratio = margin_now.max(0) as f64 / margin_base as f64;
+    ratio
+        .powf(CAPACITY_INVEST_ELASTICITY)
+        .clamp(MIN_CAPACITY, MAX_CAPACITY)
+}
+
+/// Ease `capacity` a [`CAPACITY_SMOOTHING`] fraction toward `target`, clamped to
+/// the capacity bounds. The slow ease is what makes capital sticky.
+pub fn eased_capacity(capacity: f64, target: f64) -> f64 {
+    let next = capacity + CAPACITY_SMOOTHING * (target - capacity);
+    next.clamp(MIN_CAPACITY, MAX_CAPACITY)
+}
 
 /// Apply a recipe up to `count` times this tick, stopping early if inputs run
 /// out. Returns the number of applications that actually ran.
@@ -241,6 +324,88 @@ mod tests {
             elasticity: 0.5,
         };
         assert_eq!(response_signal(&consumer), Some((CommodityId(3), false)));
+    }
+
+    fn refiner() -> ResolvedRecipe {
+        // 2 ore (base 30) -> 1 alloy (base 80): base margin = 80 - 60 = 20.
+        ResolvedRecipe {
+            id: RecipeId(0),
+            inputs: vec![(CommodityId(0), 2)],
+            outputs: vec![(CommodityId(1), 1)],
+            rate: 12,
+            elasticity: 0.8,
+        }
+    }
+
+    #[test]
+    fn only_transformers_have_capacity() {
+        let producer = ResolvedRecipe {
+            id: RecipeId(0),
+            inputs: vec![],
+            outputs: vec![(CommodityId(0), 5)],
+            rate: 1,
+            elasticity: 0.0,
+        };
+        let consumer = ResolvedRecipe {
+            id: RecipeId(0),
+            inputs: vec![(CommodityId(0), 2)],
+            outputs: vec![],
+            rate: 1,
+            elasticity: 1.0,
+        };
+        assert!(has_capacity(&refiner()), "a refiner invests");
+        assert!(!has_capacity(&producer), "a raw extractor is a fixed endowment");
+        assert!(!has_capacity(&consumer), "a consumer is population demand");
+    }
+
+    #[test]
+    fn recipe_margin_is_value_added() {
+        let r = refiner();
+        // At base prices: 1*80 - 2*30 = 20.
+        let base = |c: CommodityId| if c == CommodityId(0) { 30 } else { 80 };
+        assert_eq!(recipe_margin(&r, base), 20);
+        // Dearer output widens the margin.
+        let dear = |c: CommodityId| if c == CommodityId(0) { 30 } else { 120 };
+        assert_eq!(recipe_margin(&r, dear), 120 - 60);
+    }
+
+    #[test]
+    fn capacity_target_has_base_as_its_fixed_point() {
+        // Equal margins -> nominal capacity.
+        assert!((capacity_target(20, 20) - 1.0).abs() < 1e-9);
+        // A fatter margin pulls capacity up (but sub-linearly: elasticity 0.5).
+        let up = capacity_target(80, 20); // ratio 4 -> 4^0.5 = 2
+        assert!((up - 2.0).abs() < 1e-9, "got {up}");
+        // A thin margin pulls it down.
+        assert!(capacity_target(5, 20) < 1.0);
+        // A loss pulls to the floor.
+        assert_eq!(capacity_target(-10, 20), MIN_CAPACITY);
+        // A non-positive baseline disables the signal (consumers, loss-leaders).
+        assert_eq!(capacity_target(50, 0), 1.0);
+        assert_eq!(capacity_target(50, -5), 1.0);
+    }
+
+    #[test]
+    fn capacity_target_is_clamped() {
+        assert!(capacity_target(Money::MAX / 2, 1) <= MAX_CAPACITY);
+        assert!(capacity_target(0, 20) >= MIN_CAPACITY);
+    }
+
+    #[test]
+    fn eased_capacity_creeps_toward_target_and_clamps() {
+        // One step closes only CAPACITY_SMOOTHING of the gap: capital is sticky.
+        let next = eased_capacity(1.0, 2.0);
+        assert!((next - (1.0 + CAPACITY_SMOOTHING)).abs() < 1e-9, "got {next}");
+        assert!(next < 1.1, "a single tick barely moves capacity");
+        // Repeated easing converges to the target.
+        let mut c = 1.0;
+        for _ in 0..2000 {
+            c = eased_capacity(c, 3.0);
+        }
+        assert!((c - 3.0).abs() < 1e-3, "converged to target, got {c}");
+        // Bounds hold even for an out-of-range target.
+        assert_eq!(eased_capacity(MAX_CAPACITY, 100.0), MAX_CAPACITY);
+        assert_eq!(eased_capacity(MIN_CAPACITY, 0.0), MIN_CAPACITY);
     }
 
     #[test]

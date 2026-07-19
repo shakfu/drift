@@ -38,8 +38,19 @@ Modding / scripting
   script table. `register_script` adds a named Rhai strategy that content selects by
   name exactly like a built-in; the world keeps the table and dispatches scripted
   strategies each repricing tick, floored safely on any script error. An end-to-end
-  test drives a live market's prices from a Rhai script. Loading `.rhai` from mod
-  manifests (rather than registering programmatically) is the remaining step.
+  test drives a live market's prices from a Rhai script.
+- Scripts loaded from mod manifests (no more programmatic registration): a
+  `[[scripts]]` table (`name`, `path`, `kind`) declares a named strategy backed by
+  a `.rhai` file. The loader reads the source from disk, enforces unique script
+  names across mods, rejects a name that shadows a built-in, and folds the declared
+  names into the pricing set it validates each system's `pricing` against — so a
+  system selects a disk-authored strategy by name and a typo still fails fast at
+  link time. `Registry::scripts()` carries the source through linking;
+  `drift_economy::pricing_for(&registry)` compiles them into the run's strategy set
+  at `Session` build, aborting with a clear error if a script does not compile.
+  `ScriptKind` (currently just `pricing`) is the extension point for future
+  trader-AI and event-rule hooks. Scripts are folded into `Registry::content_hash`,
+  so a behaviour-mod difference is caught by the client/server handshake too.
 
 Data-driven mods
 
@@ -58,6 +69,18 @@ Economy
   locally dear, capping scarcity prices at an interior equilibrium.
 - Production chains (`ore -> alloys -> machinery -> luxuries`) plus raw production
   and population consumption.
+- Endogenous manufacturing capacity: each transformer industry (a recipe with both
+  inputs and outputs) carries a slow capital stock that scales its throughput on
+  top of the instantaneous price elasticity. Capacity eases toward a target set by
+  the industry's processing margin (output value minus input cost) relative to that
+  margin at base prices — investing when the margin is fat, disinvesting when thin,
+  with base prices as the fixed point. Capital is deliberately sticky (eased at
+  `0.02`/tick against prices' `0.2`), so supply gains a lagged, path-dependent
+  response that still converges: in the bundled galaxy manufacturing capital
+  settles around `2x` and bids intermediate goods up into a new interior
+  equilibrium. Raw extractors and pure consumers are fixed endowments and hold
+  nominal capacity. Capacity is part of the `Snapshot` (so a resumed run restores
+  it) and is covered by unit tests plus an end-to-end convergence test.
 - NPC trader economy: greedy buy-low/sell-high agents that self-correct shortages
   and gluts; idle traders deadhead toward opportunity.
 - Risk-aware routing: traders discount a run's profit by destination danger
@@ -155,7 +178,119 @@ Combat and factions
   **weapon variety** — three selectable player weapons (a fast Pulse, a heavy
   Cannon, and a three-bolt Scatter), cycled with `Tab`, each with its own damage,
   fire rate, and bolt visuals — and **explosions**: a growing emissive flash and a
-  burst of fragments when any ship dies. The determinism firewall holds: the
+  burst of fragments when any ship dies.
+- Elite-style targeting and flight feel. A new tested, engine-agnostic
+  `drift_flight::targeting` module carries the defining combat math — a projectile
+  **lead/intercept** solver (`firing_solution`), a **radar contact** projection
+  (`radar_contact` + a unit-disc mapping), and target-selection helpers — with 19
+  unit tests (the lead solver is checked for self-consistency: the projectile and
+  target genuinely coincide at the solved time). The Bevy app drives it: `T` locks
+  and cycles the nearest hostile, drawing a reticle on it and a floating **lead
+  pip** at the weapon's intercept point (you fly the nose onto the pip, not onto
+  the enemy — fixed weapons fire straight ahead); a bottom-left **contact scanner**
+  plots hostiles and the station by bearing/range with behind-contacts dimmed;
+  **throttle is set-and-hold** (`W`/`S` slew it, `X` cuts to a stop) instead of
+  momentary thrust, with a **zero detent** so the throttle parks cleanly on a dead
+  stop rather than sliding through into reverse (crossing into reverse takes a
+  deliberate release-and-press); the detent lives in the tested `flight::Throttle`
+  and is unit-tested (held reverse from a positive setting never overshoots past
+  zero). The HUD gains a target panel (range, closing speed, hull,
+  shield, and an on-target cue); and hostiles now **lead their own shots** with the
+  same solver and orbit at knife range rather than firing at where you were.
+- Gimballed vs. fixed weapons. A weapon may carry a gimbal half-angle: a
+  **gimballed** weapon (the Pulse) auto-tracks the locked target within its cone —
+  `targeting::gimbal_aim` resolves whether the target is in-arc and returns the
+  tracking direction — while **fixed** weapons (Cannon, Scatter) always fire
+  straight down the nose, trading forgiveness for punch. The HUD shows the mount
+  type and a "GIMBAL LOCKED" / "out of arc" cue. Unit-tested (cone edge in/out,
+  target astern) and wired through the same lead solution.
+- Navy fights alongside you. Navy patrols the sim reports in the current system
+  spawn as live **allies** that hunt the nearest hostile, lead their shots (the
+  same `firing_solution` the player and pirates use), and orbit at range — the
+  mirror of the hostile AI, firing friendly bolts. Hostiles now engage the nearest
+  of the player *or* an ally, so a defended system plays out as a real skirmish
+  rather than everyone dogpiling the player. Allies are shown on the HUD (`NAVY n`)
+  and the scanner (teal); a downed ally is a local casualty only — the report never
+  reaches the sim, which manages its own navy attrition, so the determinism
+  firewall holds (the flight layer stays authoritative solely for the player's
+  outcomes).
+- Oolite-aligned controls, HUD, and 3-D objects (studied from the OoliteProject
+  source). **Controls** match Oolite: roll on the left/right arrows, pitch on
+  up/down (flight-sim sense), yaw on `,`/`.`, throttle on `W`/`S`, fire on `A`,
+  target on `T`. **3-D objects** are the iconic silhouettes, built procedurally
+  (no external assets): the station is a rotating **Coriolis cuboctahedron** (six
+  square + eight triangular faces) with a docking slot on the face toward you,
+  rolling about its docking axis. A `faceted_mesh` helper builds flat-shaded
+  low-poly meshes with correct outward normals and winding, plus `dart_hull` and
+  `freighter_hull` primitives for fighter and freighter silhouettes.
+- Data-driven ship visuals. `ShipDef` gains an optional `visual` block — a
+  `HullShape` (`dart`/`freighter`), nose-to-tail `length`, `width`, `height`, and
+  an RGB `color` — so a ship's appearance is authored in content, not the client.
+  The flight client builds one mesh + tinted material per ship type from the
+  registry's `visual` blocks (with a generic fallback) and renders every agent as
+  its *own* ship: the bundled `core:*` ships are given hulls, so the player flies a
+  Cobra Mk III, navy frigates and pirate raiders and Pythons all look distinct, and
+  a mod can add a new ship's look with zero client code. The visual is engine-
+  agnostic data (no renderer types) and is deliberately excluded from
+  `content_hash` — it is cosmetic and must not gate the multiplayer handshake. **HUD** gains an Oolite-style instrument cluster: speed,
+  throttle, hull, and shield **gauges** (bottom-right, with warning colours and a
+  reverse-throttle tint), centre-zero **roll and pitch indicators**, a **compass**
+  (bottom-centre) whose blip points to the station and dims when it is behind you,
+  a locked-target **data panel** with the target's own hull/shield bars
+  (top-right), and a fixed centre **gunsight**; the text panel is now just
+  nav/jump/market. `combat::Health` gained `max_hull`/`hull_frac` so hull
+  reads as a gauge fraction (unit-tested).
+- Missiles and ECM (Oolite's signature combat layer). Lock a target (`T`) and fire
+  a **homing missile** (`M`) from limited stores (refilled on docking); the missile
+  chases its target, turning toward the intercept point at a hard rad/s limit — the
+  guidance is a new tested `targeting::home_missile` (unit tests prove it hits a
+  stationary and a crossing target, holds constant speed, and that a sluggish
+  missile is dodgeable). Hostiles loose their own homing missiles at you on a
+  stagger, and **ECM** (`E`, on a cooldown) detonates every incoming missile at
+  once — the counter that makes a lock survivable. Warheads hit hard (≈45 damage);
+  the HUD shows missile stores and ECM readiness; missiles clear on jump/dock.
+- Fuel-limited hyperspace, torus drive, and legal status (more Oolite systems),
+  with the rules in a new tested `drift_flight::nav` module. **Hyperspace costs
+  fuel** by inter-system distance (`nav::jump_fuel_cost`): a jump you cannot afford
+  is refused, and docking refuels the 7.0-LY tank. The **torus drive / fuel
+  injectors** (`J`) is a fast cruise to the station that burns fuel and is
+  mass-locked (disabled) whenever a hostile is present. **Legal status**: attacking
+  the navy raises a bounty (`nav::legal_status` → Clean / Offender / Fugitive), and
+  a wanted pilot is hunted by the police — the navy switch from escorting you to
+  firing on you. A `FUEL` gauge joins the HUD cluster and the readout shows legal
+  status and bounty. The nav math (jump cost, affordability, status thresholds) is
+  unit-tested.
+- Cargo canisters & scooping (the Oolite loot loop). A destroyed pirate spills
+  drifting **cargo canisters** (deterministic from its id, so a fixed seed replays
+  identically); flying within scoop range vacuums them into the hold through a new
+  authoritative `Command::ScoopCargo`, which adds as much as the hold can carry
+  free of charge and rejects a full hold (unit-tested — free, mass-capped, and
+  rejected when full). Canisters drift, tumble, and decay, and clear on jump/dock;
+  the HUD shows a `CARGO used/cap` readout so a filling hold is visible. This
+  closes the kill → scoop → sell loop: shoot a pirate, scoop its cargo, sell it at
+  the next station — all riding the existing command pipeline, so the determinism
+  firewall holds (the flight layer only *reports* the scoop; the sim owns the
+  hold).
+- Weapon subsystems and a beam laser. A tested `drift_flight::weapons` module adds
+  Oolite-style **laser temperature**: firing builds heat, heat dissipates, and a
+  laser pushed to its limit **cuts out** until it cools back (hysteresis so it
+  doesn't chatter), making sustained fire self-limiting — unit-tested (overheats
+  under sustained fire, comes back online once cool, and measured fire never
+  trips). Each weapon has a heat cost, a `TEMP` gauge joins the HUD (amber hot, red
+  cut-out), and a fourth weapon lands: a continuous **beam laser** that melts the
+  nearest hostile in a forward cone (damage-per-second, rendered as a bright bar)
+  and heats up fast.
+- Improved ship rendering: hulls are now **metallic** (glossier, catching the
+  star's light with a faint self-glow), and every combat ship carries a tail
+  **engine glow** (attached as a child of the hull), so pirates and navy read as
+  ships rather than flat shapes.
+- Natural starfield: the sky was a Fibonacci lattice, whose even spacing read as an
+  ordered spiral/grid. It is now scattered by uniform random sphere-sampling from a
+  hash of the star index (deterministic — no RNG, identical every run) with
+  per-star size variation, so it looks randomly strewn.
+- The targeting/weapons math is verified headlessly; the Bevy wiring is compile-
+  and clippy-checked (visual tuning wants a real display).
+- The determinism firewall holds: the
   free-flight position never enters the sim; only validated commands flow back. The
   Bevy app lives behind a `gui` feature so the default workspace build/test/lint
   stays fast and graphics-free; the tested `flight`/`scene` models carry the
@@ -194,6 +329,14 @@ Player and clients
   types, the length-prefixed JSON framing, and `WorldView` — the owned mirror a
   client deserializes a broadcast snapshot into (the server sends a borrowed,
   serialize-only `Snapshot`).
+- Content-version handshake: `Registry::content_hash()` fingerprints the
+  fully-linked content (a dependency-free FNV-1a over commodities, recipes,
+  systems, and ships in interned order, so it is stable across builds and changes
+  with any content difference). On connect a client sends the hash as a
+  `ClientMessage::Hello`; the server compares it to its own and, on a mismatch,
+  replies `ServerMessage::Reject` and drops the connection before the client
+  enters the sim. Mismatched mods now fail loudly at connect instead of silently
+  desyncing id interning against the authoritative world.
 - Networked client mode (`drift-client --connect <addr>`): the graphical client
   now renders from a read-model fed by either an in-process `Session` or a remote
   server. A background thread receives broadcasts into an owned `WorldView` and a

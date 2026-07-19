@@ -781,6 +781,7 @@ mod tests {
     fn two_system_reg() -> Arc<Registry> {
         let pricing: HashSet<String> = builtin_pricing().names().map(String::from).collect();
         let merged = MergedContent {
+            scripts: vec![],
             commodities: vec![CommodityDef {
                 id: "t:food".into(),
                 name: "Food".into(),
@@ -835,6 +836,7 @@ mod tests {
                 hull: 100,
                 max_speed: 100.0,
                 combat: None,
+                visual: None,
             }],
         };
         Arc::new(link(merged, &pricing).unwrap())

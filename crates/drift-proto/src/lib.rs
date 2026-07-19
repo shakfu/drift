@@ -29,6 +29,12 @@ use serde::{Deserialize, Serialize};
 /// A message from a client to the server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientMessage {
+    /// The handshake a client must send as its **first** message: the
+    /// `content_hash` of the mods it loaded locally (from `drift_mods::Registry`).
+    /// The server compares it to its own and refuses a mismatch with a
+    /// [`ServerMessage::Reject`], because a client running different content
+    /// resolves the same name to a different handle and would silently desync.
+    Hello { content_hash: u64 },
     /// A player action to apply at the next tick boundary. The server validates
     /// it; an invalid command is dropped, not fatal.
     Command(Command),
@@ -50,6 +56,12 @@ pub enum ServerMessage {
         events: Vec<SimEvent>,
         snapshot: Option<serde_json::Value>,
     },
+    /// The server refused the connection during the handshake and is about to
+    /// close it. Sent instead of a welcome [`State`](ServerMessage::State) when
+    /// the client's [`Hello`](ClientMessage::Hello) content hash does not match
+    /// the server's (or the client did not handshake first). `reason` is a
+    /// human-readable diagnostic for the client to show the player.
+    Reject { reason: String },
 }
 
 /// An owned mirror of the mutable world state a client renders from.

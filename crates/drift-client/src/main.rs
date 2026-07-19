@@ -44,7 +44,8 @@ fn main() -> Result<()> {
         // Networked observer: load the same content the server runs (for static
         // map data), then connect and render its broadcasts.
         let reg = load_registry(&args.mods).context("loading content")?;
-        let net = NetClient::connect(addr).with_context(|| format!("connecting to {addr}"))?;
+        let net = NetClient::connect(addr, reg.content_hash())
+            .with_context(|| format!("connecting to {addr}"))?;
         app::DriftApp::remote(reg, net)
     } else {
         // In-process observer.

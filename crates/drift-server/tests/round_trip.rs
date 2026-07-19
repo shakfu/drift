@@ -43,7 +43,9 @@ fn sandbox_scenario() -> ScenarioDef {
 }
 
 fn trader_count(msg: &ServerMessage) -> Option<usize> {
-    let ServerMessage::State { snapshot, .. } = msg;
+    let ServerMessage::State { snapshot, .. } = msg else {
+        return None;
+    };
     let snap = snapshot.as_ref()?;
     Some(snap.get("traders")?.as_array()?.len())
 }
@@ -56,7 +58,7 @@ fn client_spawns_a_trader_and_sees_it_in_a_broadcast() {
     let ship = reg.ship_id("core:cobra_mk3").unwrap();
     let at = reg.system_id("core:lave").unwrap();
 
-    let session = Session::new(reg, &sandbox_scenario(), 1).unwrap();
+    let session = Session::new(reg.clone(), &sandbox_scenario(), 1).unwrap();
 
     // Bind on an ephemeral port so the test never collides with a real server.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -75,6 +77,14 @@ fn client_spawns_a_trader_and_sees_it_in_a_broadcast() {
     });
 
     let mut client = TcpStream::connect(addr).unwrap();
+
+    // Handshake first: the server withholds the welcome until it sees a matching
+    // content hash.
+    write_msg(
+        &mut client,
+        &ClientMessage::Hello { content_hash: reg.content_hash() },
+    )
+    .unwrap();
 
     // First broadcast (the welcome) carries a snapshot with no traders yet.
     let first: ServerMessage = read_msg(&mut client).unwrap();

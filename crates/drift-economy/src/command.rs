@@ -121,6 +121,16 @@ pub enum Command {
     /// Report that the player's trader was destroyed in a real-time fight. The sim
     /// destroys it (cargo lost, respawn scheduled) and pays out any insurance.
     TraderDestroyed { player: PlayerId, trader: TraderId },
+    /// Scoop a drifting cargo canister (a kill's spilled loot) into the player's
+    /// hold, free of charge. The sim adds as much as the hold can carry; a full
+    /// hold rejects it. Reported by the flight layer when the player flies over a
+    /// canister.
+    ScoopCargo {
+        player: PlayerId,
+        trader: TraderId,
+        commodity: CommodityId,
+        qty: Quantity,
+    },
 }
 
 impl Command {
@@ -139,7 +149,8 @@ impl Command {
             | Command::BuyInsurance { player, .. }
             | Command::OpenFuture { player, .. }
             | Command::DestroyedPirate { player, .. }
-            | Command::TraderDestroyed { player, .. } => player,
+            | Command::TraderDestroyed { player, .. }
+            | Command::ScoopCargo { player, .. } => player,
         }
     }
 }

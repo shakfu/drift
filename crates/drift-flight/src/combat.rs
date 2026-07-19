@@ -14,6 +14,7 @@
 #[derive(Debug, Clone, Copy)]
 pub struct Health {
     pub hull: f32,
+    pub max_hull: f32,
     pub shield: f32,
     pub max_shield: f32,
     pub shield_regen: f32,
@@ -21,9 +22,20 @@ pub struct Health {
 
 impl Health {
     /// A ship with `hull` structure and a `shield` that regenerates `regen` points
-    /// per second up to its starting value.
+    /// per second up to its starting value. The starting `hull`/`shield` are taken
+    /// as the maxima, so [`hull_frac`](Self::hull_frac) and
+    /// [`shield_frac`](Self::shield_frac) read as gauge fills.
     pub fn new(hull: f32, shield: f32, regen: f32) -> Self {
-        Self { hull, shield, max_shield: shield, shield_regen: regen }
+        Self { hull, max_hull: hull, shield, max_shield: shield, shield_regen: regen }
+    }
+
+    /// Hull as a fraction of maximum, for a gauge (0 if it has no hull).
+    pub fn hull_frac(&self) -> f32 {
+        if self.max_hull > 0.0 {
+            (self.hull / self.max_hull).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
     /// Apply `amount` damage: the shield absorbs first, the remainder cuts hull.

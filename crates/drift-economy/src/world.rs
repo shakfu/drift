@@ -24,7 +24,10 @@ use crate::market::{Market, MarketGood};
 use crate::patrol::{Patrol, PatrolId, PatrolLocation};
 use crate::pricing::PricingSet;
 use drift_script::ScriptedPricing;
-use crate::production::{apply_recipe, elastic_factor, response_signal, MAX_ELASTIC_FACTOR};
+use crate::production::{
+    apply_recipe, capacity_target, eased_capacity, elastic_factor, has_capacity, recipe_margin,
+    response_signal, MAX_CAPACITY, MAX_ELASTIC_FACTOR,
+};
 use crate::trader::{choose_trade, Trader, TraderId, TraderLocation};
 
 /// Per-tick probability a docked patrol (pirate or navy) relocates to a
@@ -206,6 +209,10 @@ pub struct Snapshot<'a> {
     /// Fractional production progress per system, per industry (elastic rates
     /// carry a remainder between ticks).
     pub progress: &'a [Vec<f64>],
+    /// Endogenous industrial capacity per system, per industry: the slow capital
+    /// stock that scales manufacturing throughput. Part of state because it
+    /// integrates over the whole run, so a resumed run must restore it.
+    pub capacity: &'a [Vec<f64>],
     pub piracy: PiracyStats,
     pub pirates: &'a [Patrol],
     pub navy: &'a [Patrol],
@@ -240,6 +247,11 @@ pub struct World {
     /// `progress[system][industry]` accumulates fractional applications so that
     /// price-scaled (non-integer) throughput stays smooth and deterministic.
     progress: Vec<Vec<f64>>,
+    /// `capacity[system][industry]` is the industry's endogenous capital stock, a
+    /// multiplier on throughput that eases toward a profitability-driven target
+    /// each tick (see the production phase). Manufacturing industries invest and
+    /// disinvest through it; raw extractors and consumers hold `1.0`.
+    capacity: Vec<Vec<f64>>,
     /// Resolved piracy settings, or `None` when the scenario disables piracy.
     piracy: Option<PiracyRuntime>,
     piracy_stats: PiracyStats,
@@ -385,6 +397,13 @@ impl World {
             .map(|s| vec![0.0f64; s.industries.len()])
             .collect();
 
+        // Every industry starts at nominal capacity (1.0); manufacturing capacity
+        // then drifts with profitability over the run.
+        let capacity: Vec<Vec<f64>> = registry
+            .systems()
+            .map(|s| vec![1.0f64; s.industries.len()])
+            .collect();
+
         // --- piracy ---
         // Stable ids for every patrol, so running battles can refer to their
         // participants across ticks.
@@ -499,6 +518,7 @@ impl World {
             markets,
             traders,
             progress,
+            capacity,
             piracy,
             piracy_stats: PiracyStats::default(),
             pirates,
@@ -551,6 +571,12 @@ impl World {
     }
     pub fn traders(&self) -> &[Trader] {
         &self.traders
+    }
+    /// Endogenous industrial capacity, indexed `[system][industry]` parallel to a
+    /// system's `industries`. `1.0` is nominal; manufacturing industries drift
+    /// above/below it with profitability, others hold `1.0`.
+    pub fn capacity(&self) -> &[Vec<f64>] {
+        &self.capacity
     }
     pub fn registry(&self) -> &Registry {
         &self.registry
@@ -638,6 +664,7 @@ impl World {
             markets: &self.markets,
             traders: &self.traders,
             progress: &self.progress,
+            capacity: &self.capacity,
             piracy: self.piracy_stats,
             pirates: &self.pirates,
             navy: &self.navy,
@@ -1148,6 +1175,28 @@ impl World {
                 }
                 Ok(())
             }
+
+            Command::ScoopCargo { player, trader, commodity, qty } => {
+                if qty == 0 {
+                    return Err(CommandError::ZeroQuantity);
+                }
+                let idx = self.owned_trader_index(trader, player)?;
+                // Scoop as much as the hold can carry (mass-limited), free of charge.
+                let unit_mass = reg.commodity(commodity).unit_mass.max(1);
+                let capacity = reg.ship(self.traders[idx].ship).cargo_capacity;
+                let used: u32 = self.traders[idx]
+                    .cargo
+                    .iter()
+                    .map(|(c, q)| q * reg.commodity(*c).unit_mass)
+                    .sum();
+                let fits = capacity.saturating_sub(used) / unit_mass;
+                let scooped = fits.min(qty);
+                if scooped == 0 {
+                    return Err(CommandError::OverCapacity);
+                }
+                *self.traders[idx].cargo.entry(commodity).or_insert(0) += scooped;
+                Ok(())
+            }
         }
     }
 
@@ -1564,6 +1613,25 @@ impl World {
             for (j, &rid) in sys.industries.iter().enumerate() {
                 let recipe = reg.recipe(rid);
 
+                // Endogenous capacity: a manufacturing industry eases its capital
+                // stock toward a target set by its current processing margin
+                // (output value minus input cost) relative to the same margin at
+                // base prices. Using this tick's prices (production does not move
+                // price — that is the next phase) gives a clean one-tick lag.
+                if has_capacity(recipe) {
+                    let (margin_now, margin_base) = {
+                        let m = &self.markets[i];
+                        let now = recipe_margin(recipe, |c| {
+                            m.price(c).unwrap_or_else(|| reg.commodity(c).base_price)
+                        });
+                        let base = recipe_margin(recipe, |c| reg.commodity(c).base_price);
+                        (now, base)
+                    };
+                    let target = capacity_target(margin_now, margin_base);
+                    self.capacity[i][j] = eased_capacity(self.capacity[i][j], target);
+                }
+                let cap_mult = self.capacity[i][j];
+
                 // Scale the nominal rate by the price-elastic response.
                 let factor = match response_signal(recipe) {
                     Some((c, supply_side)) => {
@@ -1574,11 +1642,11 @@ impl World {
                     None => 1.0,
                 };
 
-                // Accumulate fractional throughput; apply the whole part; keep the
-                // remainder. Cap the accumulator so a starved recipe cannot store
-                // an unbounded burst.
-                let cap = recipe.rate as f64 * MAX_ELASTIC_FACTOR + 1.0;
-                let acc = (self.progress[i][j] + recipe.rate as f64 * factor).min(cap);
+                // Accumulate fractional throughput (rate * elastic response *
+                // capital stock); apply the whole part; keep the remainder. Cap the
+                // accumulator so a starved recipe cannot store an unbounded burst.
+                let cap = recipe.rate as f64 * MAX_ELASTIC_FACTOR * MAX_CAPACITY + 1.0;
+                let acc = (self.progress[i][j] + recipe.rate as f64 * factor * cap_mult).min(cap);
                 let want = acc.floor();
                 let applied = apply_recipe(&mut self.markets[i], recipe, want as u32);
                 self.progress[i][j] = acc - applied as f64;

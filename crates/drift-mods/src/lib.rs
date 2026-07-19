@@ -18,8 +18,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 pub use error::LoadError;
-pub use loader::{load, MergedContent};
-pub use manifest::Manifest;
+pub use loader::{load, LoadedScript, MergedContent};
+pub use manifest::{Manifest, ScriptEntry, ScriptKind};
 pub use registry::{link, Registry, ResolvedRecipe, ResolvedSystem};
 
 /// Convenience: load every mod under `root` and link it, validating `pricing`
